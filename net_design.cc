@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2013 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2000-2015 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -847,6 +847,7 @@ NetFuncDef* Design::find_function(NetScope*scope, const pform_name_t&name)
               // the function's signals have been elaborated. If this is
               // the case, elaborate them now.
             if (func->elab_stage() < 2) {
+		  func->need_const_func(true);
                   const PFunction*pfunc = func->func_pform();
                   assert(pfunc);
                   pfunc->elaborate_sig(this, func);
@@ -889,8 +890,8 @@ void Design::add_node(NetNode*net)
 
 void Design::del_node(NetNode*net)
 {
-      assert(net->design_ == this);
       assert(net != 0);
+      assert(net->design_ == this);
 
 	/* Interact with the Design::functor method by manipulating the
 	   cur and nxt pointers that it is using. */

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2011 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2003-2017 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -37,17 +37,17 @@ PLI_UINT64 timerec_to_time64(const struct t_vpi_time*timerec)
 
 char *as_escaped(char *arg)
 {
-      unsigned idx, cur, cnt, len = strlen(arg);
-      char *res = (char *) malloc(sizeof(char *) * len);
+      unsigned idx, cur, cnt, len = strlen(arg) + 1;
+      char *res = (char *) malloc(sizeof(char) * len);
       cur = 0;
-      cnt = len;
+      cnt = len - 1;
       for (idx = 0; idx < cnt; idx++) {
 	    if (isprint((int)arg[idx])) {
 		  res[cur] = arg[idx];
 		  cur += 1;
 	    } else {
 		  len += 3;
-		  res = (char *) realloc(res, sizeof(char *) * len);
+		  res = (char *) realloc(res, sizeof(char) * len);
 		  sprintf(&(res[cur]), "\\%03o", arg[idx]);
 		  cur += 4;
 	    }
@@ -229,15 +229,18 @@ unsigned is_string_obj(vpiHandle obj)
 
 
 /*
- * Find the enclosing module.
+ * Find the enclosing module. If there is no enclosing module (which can be
+ * the case in SystemVerilog), return the highest enclosing scope.
  */
 vpiHandle sys_func_module(vpiHandle obj)
 {
       assert(obj);
 
       while (vpi_get(vpiType, obj) != vpiModule) {
-	    obj = vpi_handle(vpiScope, obj);
-	    assert(obj);
+	    vpiHandle scope = vpi_handle(vpiScope, obj);
+	    if (scope == 0)
+		  break;
+	    obj = scope;
       }
 
       return obj;

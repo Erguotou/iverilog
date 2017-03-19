@@ -31,7 +31,7 @@
 
 class __vpiStringConst : public __vpiHandle {
     public:
-      __vpiStringConst(char*val);
+      explicit __vpiStringConst(char*val);
       ~__vpiStringConst();
       int get_type_code(void) const;
       int vpi_get(int code);
@@ -224,7 +224,7 @@ void __vpiStringConst::vpi_get_value(p_vpi_value vp)
 
 
 struct __vpiStringConstTEMP : public __vpiStringConst {
-      inline __vpiStringConstTEMP(char*v) : __vpiStringConst(v) { }
+      explicit inline __vpiStringConstTEMP(char*v) : __vpiStringConst(v) { }
       free_object_fun_t free_object_fun(void);
 };
 
@@ -257,7 +257,7 @@ class __vpiStringParam  : public __vpiStringConst {
       char*vpi_get_str(int code);
       vpiHandle vpi_handle(int code);
 
-      struct __vpiScope* scope;
+      __vpiScope* scope;
       bool     local_flag;
       unsigned file_idx;
       unsigned lineno;
@@ -454,7 +454,7 @@ struct __vpiBinaryParam  : public __vpiBinaryConst {
       char*vpi_get_str(int code);
       vpiHandle vpi_handle(int code);
 
-      struct __vpiScope*scope;
+      __vpiScope*scope;
       unsigned file_idx;
       unsigned lineno;
       bool     local_flag;
@@ -683,7 +683,7 @@ struct __vpiRealParam  : public __vpiRealConst {
       char*vpi_get_str(int code);
       vpiHandle vpi_handle(int code);
 
-      struct __vpiScope* scope;
+      __vpiScope* scope;
       bool local_flag;
       unsigned file_idx;
       unsigned lineno;

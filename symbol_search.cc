@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2003-2012 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2003-2015 Stephen Williams (steve@icarus.com)
  * Copyright CERN 2012 / Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
@@ -66,6 +66,7 @@ static bool symbol_search(const LineInfo*li, Design*des, NetScope*scope,
       bool prefix_scope = false;
       bool recurse_flag = false;
 
+      assert(li);
       ivl_assert(*li, ! path.empty());
       name_component_t path_tail = path.back();
       path.pop_back();
@@ -88,13 +89,13 @@ static bool symbol_search(const LineInfo*li, Design*des, NetScope*scope,
 		  return false;
 
 	      // The prefix is found to be a scope, so switch to that
-	      // scope, set the hier_path to turn of upwards searches,
+	      // scope, set the hier_path to turn off upwards searches,
 	      // and continue our search for the tail.
 	    if (recurse.is_scope()) {
 		  scope = recurse.scope;
 		  prefix_scope = true;
 
-		  if (scope->is_auto() && li) {
+		  if (scope->is_auto()) {
 			cerr << li->get_fileline() << ": error: Hierarchical "
 			      "reference to automatically allocated item "
 			      "`" << path_tail.name << "' in path `" << path << "'" << endl;

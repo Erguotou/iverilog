@@ -115,7 +115,14 @@ static void vthr_real_get_value(vpiHandle ref, s_vpi_value*vp)
 	    break;
 
 	  case vpiDecStrVal:
+#if !defined(__GNUC__)
+		if (isnan(val))
+			sprintf(rbuf, "%s", "nan");
+		else
+			sprintf(rbuf, "%0.0f", val);
+#else
 	    sprintf(rbuf, "%0.0f", val);
+#endif
 	    vp->value.str = rbuf;
 	    break;
 
@@ -200,7 +207,7 @@ static void thread_word_delete_real(vpiHandle item)
 
 class __vpiVThrStrStack : public __vpiHandle {
     public:
-      __vpiVThrStrStack(unsigned depth);
+      explicit __vpiVThrStrStack(unsigned depth);
       int get_type_code(void) const;
       int vpi_get(int code);
       void vpi_get_value(p_vpi_value val);
@@ -569,7 +576,7 @@ void thread_vthr_delete(vpiHandle item)
 
 static void thread_vthr_delete_real(vpiHandle item)
 {
-      class __vpiVThrVec4Stack*obj = dynamic_cast<__vpiVThrVec4Stack*>(item);
+      __vpiVThrVec4Stack*obj = dynamic_cast<__vpiVThrVec4Stack*>(item);
       delete obj;
 }
 
@@ -586,13 +593,13 @@ void vpi_handle_delete()
 
 vpiHandle vpip_make_vthr_str_stack(unsigned depth)
 {
-      class __vpiVThrStrStack*obj = new __vpiVThrStrStack(depth);
+      __vpiVThrStrStack*obj = new __vpiVThrStrStack(depth);
       return obj;
 }
 
 vpiHandle vpip_make_vthr_vec4_stack(unsigned depth, bool signed_flag, unsigned wid)
 {
-      class __vpiVThrVec4Stack*obj = new __vpiVThrVec4Stack(depth, signed_flag, wid);
+      __vpiVThrVec4Stack*obj = new __vpiVThrVec4Stack(depth, signed_flag, wid);
       return obj;
 }
 
@@ -606,7 +613,7 @@ void thread_string_delete(vpiHandle item)
 
 static void thread_string_delete_real(vpiHandle item)
 {
-      class __vpiVThrStrStack*obj = dynamic_cast<__vpiVThrStrStack*>(item);
+      __vpiVThrStrStack*obj = dynamic_cast<__vpiVThrStrStack*>(item);
       delete obj;
 }
 

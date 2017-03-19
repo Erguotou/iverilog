@@ -1,5 +1,5 @@
 const char COPYRIGHT[] =
-          "Copyright (c) 1998-2014 Stephen Williams (steve@icarus.com)";
+          "Copyright (c) 1998-2016 Stephen Williams (steve@icarus.com)";
 
 /*
  *    This source code is free software; you can redistribute it
@@ -108,6 +108,7 @@ bool gn_assertions_flag = true;
 bool gn_io_range_error_flag = true;
 bool gn_strict_ca_eval_flag = false;
 bool gn_strict_expr_width_flag = false;
+bool gn_shared_loop_index_flag = true;
 bool gn_verilog_ams_flag = false;
 
 /*
@@ -153,6 +154,7 @@ FILE *depend_file = NULL;
  * These are the warning enable flags.
  */
 bool warn_implicit  = false;
+bool warn_implicit_dimensions = false;
 bool warn_timescale = false;
 bool warn_portbinding = false;
 bool warn_inf_loop = false;
@@ -160,6 +162,7 @@ bool warn_ob_select = false;
 bool warn_sens_entire_vec = false;
 bool warn_sens_entire_arr = false;
 bool warn_anachronisms = false;
+bool warn_floating_nets = false;
 
 /*
  * Debug message class flags.
@@ -224,6 +227,7 @@ const bool CASE_SENSITIVE = true;
 bool synthesis = false;
 
 extern void cprop(Design*des);
+extern void exposenodes(Design*des);
 extern void synth(Design*des);
 extern void synth2(Design*des);
 extern void syn_rules(Design*des);
@@ -234,10 +238,11 @@ static struct net_func_map {
       const char*name;
       void (*func)(Design*);
 } func_table[] = {
-      { "cprop",   &cprop },
-      { "nodangle",&nodangle },
-      { "synth",   &synth },
-      { "synth2",  &synth2 },
+      { "cprop",       &cprop },
+      { "exposenodes", &exposenodes },
+      { "nodangle",    &nodangle },
+      { "synth",       &synth },
+      { "synth2",      &synth2 },
       { "syn-rules",   &syn_rules },
       { 0, 0 }
 };
@@ -342,6 +347,12 @@ static void process_generation_flag(const char*gen)
 
       } else if (strcmp(gen,"no-strict-expr-width") == 0) {
 	    gn_strict_expr_width_flag = false;
+
+      } else if (strcmp(gen,"shared-loop-index") == 0) {
+	    gn_shared_loop_index_flag = true;
+
+      } else if (strcmp(gen,"no-shared-loop-index") == 0) {
+	    gn_shared_loop_index_flag = false;
 
 	  } else {
       }
@@ -675,8 +686,14 @@ static void read_iconfig_file(const char*ipath)
 	    } else if (strcmp(buf,"warnings") == 0) {
 		    /* Scan the warnings enable string for warning flags. */
 		  for ( ;  *cp ;  cp += 1) switch (*cp) {
+		      case 'f':
+			warn_floating_nets = true;
+			break;
 		      case 'i':
 			warn_implicit = true;
+			break;
+		      case 'd':
+			warn_implicit_dimensions = true;
 			break;
 		      case 'l':
 			warn_inf_loop = true;
@@ -828,6 +845,7 @@ int main(int argc, char*argv[])
 	// Start the module list with the base system module.
       add_vpi_module("system");
       add_vpi_module("vhdl_sys");
+      add_vpi_module("vhdl_textio");
 
       flags["-o"] = strdup("a.out");
       min_typ_max_flag = TYP;
@@ -1107,7 +1125,7 @@ int main(int argc, char*argv[])
 
 	/* Decide if we are going to allow system functions to be called
 	 * as tasks. */
-      if (generation_flag >= GN_VER2005_SV) {
+      if (gn_system_verilog()) {
 	    def_sfunc_as_task = IVL_SFUNC_AS_TASK_WARNING;
       }
 

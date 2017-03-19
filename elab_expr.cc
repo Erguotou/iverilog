@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2015 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 1999-2016 Stephen Williams (steve@icarus.com)
  * Copyright CERN 2013 / Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
@@ -90,7 +90,7 @@ static NetBranch* find_existing_implicit_branch(NetNet*sig, NetNet*gnd)
 
 NetExpr* elaborate_rval_expr(Design*des, NetScope*scope, ivl_type_t lv_net_type,
 			     ivl_variable_type_t lv_type, unsigned lv_width,
-			     PExpr*expr, bool need_const)
+			     PExpr*expr, bool need_const, bool force_unsigned)
 {
       if (debug_elaborate) {
 	    cerr << expr->get_fileline() << ": elaborate_rval_expr: "
@@ -135,7 +135,7 @@ NetExpr* elaborate_rval_expr(Design*des, NetScope*scope, ivl_type_t lv_net_type,
       }
 
       return elab_and_eval(des, scope, expr, context_wid, need_const,
-			   false, lv_type);
+			   false, lv_type, force_unsigned);
 }
 
 /*
@@ -675,10 +675,7 @@ NetExpr* PEBComp::elaborate_expr(Design*des, NetScope*scope,
       NetExpr*tmp = new NetEBComp(op_, lp, rp);
       tmp->set_line(*this);
 
-      tmp = pad_to_width(tmp, expr_wid, *this);
-      tmp->cast_signed(signed_flag_);
-
-      return tmp;
+      return pad_to_width(tmp, expr_wid, signed_flag_, *this);
 }
 
 unsigned PEBLogic::test_width(Design*, NetScope*, width_mode_t&)
@@ -716,10 +713,7 @@ NetExpr*PEBLogic::elaborate_expr(Design*des, NetScope*scope,
       NetExpr*tmp = new NetEBLogic(op_, lp, rp);
       tmp->set_line(*this);
 
-      tmp = pad_to_width(tmp, expr_wid, *this);
-      tmp->cast_signed(signed_flag_);
-
-      return tmp;
+      return pad_to_width(tmp, expr_wid, signed_flag_, *this);
 }
 
 unsigned PEBLeftWidth::test_width(Design*des, NetScope*scope, width_mode_t&mode)
@@ -1035,8 +1029,7 @@ NetExpr*PEBShift::elaborate_expr_leaf(Design*des, NetExpr*lp, NetExpr*rp,
 		  tmp->set_line(*this);
 		  tmp = new NetESelect(lp, tmp, 1);
 		  tmp->set_line(*this);
-		  tmp = pad_to_width(tmp, expr_wid, *this);
-		  tmp->cast_signed(true);
+		  tmp = pad_to_width(tmp, expr_wid, true, *this);
 
                   delete rp;
 		  return tmp;
@@ -1078,7 +1071,7 @@ unsigned PECallFunction::test_width_sfunc_(Design*des, NetScope*scope,
 
       if (name=="$ivlh_to_unsigned") {
 	    ivl_assert(*this, parms_.size() == 2);
-	      // The Icarus Verilog specific $ivl_unsigned() system
+	      // The Icarus Verilog specific $ivlh_to_unsigned() system
 	      // task takes a second argument which is the output
 	      // size. This can be an arbitrary constant function.
 	    PExpr*pexpr = parms_[1];
@@ -1099,6 +1092,11 @@ unsigned PECallFunction::test_width_sfunc_(Design*des, NetScope*scope,
 	    long value = 0;
 	    bool rc = eval_as_long(value, nexpr);
 	    ivl_assert(*this, rc && value>=0);
+
+	      // The argument type/width is self-determined and doesn't
+	      // affect the result type/width.
+	    width_mode_t arg_mode = SIZED;
+	    parms_[0]->test_width(des, scope, arg_mode);
 
 	    expr_width_ = value;
 	    signed_flag_= false;
@@ -1272,7 +1270,6 @@ unsigned PECallFunction::test_width_method_(Design*des, NetScope*scope,
 	    return 0;
 
       perm_string member_name;
-      ivl_type_t  member_type = 0;
       pform_name_t use_path = path_;
       perm_string method_name = peek_tail_name(use_path);
       use_path.pop_back();
@@ -1312,11 +1309,8 @@ unsigned PECallFunction::test_width_method_(Design*des, NetScope*scope,
 
 		  const netclass_t* class_type = net->class_type();
 		  int midx = class_type->property_idx_from_name(member_name);
-		  if (midx >= 0)
-			member_type = class_type->get_prop_type(midx);
-		  else
-			member_type = 0;
-		  use_path = tmp_path;
+		  ivl_type_t  member_type = 0;
+		  if (midx >= 0) member_type = class_type->get_prop_type(midx);
 
 		  use_darray = dynamic_cast<const netdarray_t*> (member_type);
 
@@ -1330,7 +1324,7 @@ unsigned PECallFunction::test_width_method_(Design*des, NetScope*scope,
       if (net == 0)
 	    return 0;
 
-	// Look fonr built in string attributes.
+	// Look for built in string attributes.
       if (net->data_type()==IVL_VT_STRING) {
 
 	    if (method_name == "len") {
@@ -1405,27 +1399,11 @@ NetExpr*PECallFunction::cast_to_width_(NetExpr*expr, unsigned wid) const
       if (debug_elaborate) {
             cerr << get_fileline() << ": PECallFunction::cast_to_width_: "
 		 << "cast to " << wid
-                 << " bits " << (signed_flag_?"signed":"unsigned")
+                 << " bits " << (signed_flag_ ? "signed" : "unsigned")
 		 << " from expr_width()=" << expr->expr_width() << endl;
       }
 
-        /* If the expression is a const, then replace it with a new
-           const. This is a more efficient result. */
-      if (NetEConst*tmp = dynamic_cast<NetEConst*>(expr)) {
-            tmp->cast_signed(signed_flag_);
-            if (wid > tmp->expr_width()) {
-                  tmp = new NetEConst(verinum(tmp->value(), wid));
-                  tmp->set_line(*this);
-                  delete expr;
-            }
-            return tmp;
-      }
-
-      NetESelect*tmp = new NetESelect(expr, 0, wid);
-      tmp->cast_signed(signed_flag_);
-      tmp->set_line(*this);
-
-      return tmp;
+      return cast_to_width(expr, wid, signed_flag_, *this);
 }
 
 /*
@@ -1449,7 +1427,7 @@ NetExpr* PECallFunction::elaborate_sfunc_(Design*des, NetScope*scope,
 
 	    PExpr*expr = parms_[0];
 	    ivl_assert(*this, expr);
-	    NetExpr*sub = expr->elaborate_expr(des, scope, expr_width_, flags);
+	    NetExpr*sub = expr->elaborate_expr(des, scope, expr->expr_width(), flags);
 	    return cast_to_width_(sub, expr_wid);
       }
 
@@ -1530,7 +1508,7 @@ NetExpr* PECallFunction::elaborate_sfunc_(Design*des, NetScope*scope,
 
 	    PExpr*expr = parms_[0];
 
-	    verinum val (expr->has_sign()? verinum::V1 : verinum::V0, 1);
+	    verinum val (expr->has_sign() ? verinum::V1 : verinum::V0, 1);
 	    NetEConst*sub = new NetEConst(val);
 	    sub->set_line(*this);
 
@@ -1571,6 +1549,18 @@ NetExpr* PECallFunction::elaborate_sfunc_(Design*des, NetScope*scope,
 
       bool need_const = NEED_CONST & flags;
 
+	/* These functions can work in a constant context with a signal expression. */
+      if ((nparms == 1) && (dynamic_cast<PEIdent*>(parms_[0]))) {
+	    if (strcmp(name, "$dimensions") == 0) need_const = false;
+	    else if (strcmp(name, "$high") == 0) need_const = false;
+	    else if (strcmp(name, "$increment") == 0) need_const = false;
+	    else if (strcmp(name, "$left") == 0) need_const = false;
+	    else if (strcmp(name, "$low") == 0) need_const = false;
+	    else if (strcmp(name, "$right") == 0) need_const = false;
+	    else if (strcmp(name, "$size") == 0) need_const = false;
+	    else if (strcmp(name, "$unpacked_dimensions") == 0) need_const = false;
+      }
+
       unsigned parm_errors = 0;
       unsigned missing_parms = 0;
       for (unsigned idx = 0 ;  idx < nparms ;  idx += 1) {
@@ -1592,7 +1582,7 @@ NetExpr* PECallFunction::elaborate_sfunc_(Design*des, NetScope*scope,
 
       if (missing_parms > 0) {
 	    cerr << get_fileline() << ": error: The function " << name
-		 << " has been called with empty parameters." << endl;
+		 << " has been called with missing/empty parameters." << endl;
 	    cerr << get_fileline() << ":      : Verilog doesn't allow "
 		 << "passing empty parameters to functions." << endl;
 	    des->errors += 1;
@@ -1601,10 +1591,7 @@ NetExpr* PECallFunction::elaborate_sfunc_(Design*des, NetScope*scope,
       if (missing_parms || parm_errors)
             return 0;
 
-      NetExpr*tmp = pad_to_width(fun, expr_wid, *this);
-      tmp->cast_signed(signed_flag_);
-
-      return tmp;
+      return pad_to_width(fun, expr_wid, signed_flag_, *this);
 }
 
 NetExpr* PECallFunction::elaborate_access_func_(Design*des, NetScope*scope,
@@ -1661,10 +1648,7 @@ NetExpr* PECallFunction::elaborate_access_func_(Design*des, NetScope*scope,
       NetExpr*tmp = new NetEAccess(branch, nature);
       tmp->set_line(*this);
 
-      tmp = pad_to_width(tmp, expr_wid, *this);
-      tmp->cast_signed(signed_flag_);
-
-      return tmp;
+      return pad_to_width(tmp, expr_wid, signed_flag_, *this);
 }
 
 /*
@@ -1673,7 +1657,7 @@ NetExpr* PECallFunction::elaborate_access_func_(Design*des, NetScope*scope,
 static NetExpr* check_for_enum_methods(const LineInfo*li,
                                        Design*des, NetScope*scope,
                                        const netenum_t*netenum,
-                                       pform_name_t use_path,
+                                       const pform_name_t&use_path,
                                        perm_string method_name,
                                        NetExpr*expr,
                                        unsigned rtn_wid,
@@ -2012,7 +1996,7 @@ static NetExpr* check_for_struct_members(const LineInfo*li,
       }
 
       NetESignal*sig = new NetESignal(net);
-      NetExpr  *base = packed_base? packed_base : make_const_val(off);
+      NetExpr  *base = packed_base ? packed_base : make_const_val(off);
 
       if (debug_elaborate) {
 	    cerr << li->get_fileline() << ": debug: check_for_struct_members: "
@@ -2276,10 +2260,7 @@ NetExpr* PECallFunction::elaborate_base_(Design*des, NetScope*scope, NetScope*ds
 	    if(res->darray_type())
 	        return func;
 
-            NetExpr*tmp = pad_to_width(func, expr_wid, *this);
-            tmp->cast_signed(signed_flag_);
-
-	    return tmp;
+            return pad_to_width(func, expr_wid, signed_flag_, *this);
       }
 
       cerr << get_fileline() << ": internal error: Unable to locate "
@@ -2307,6 +2288,21 @@ unsigned PECallFunction::elaborate_arguments_(Design*des, NetScope*scope,
 
       const unsigned parm_count = parms.size() - parm_off;
       const unsigned actual_count = parms_.size();
+
+	/* The parser can't distinguish between a function call with
+	   no arguments and a function call with one empty argument,
+	   and always supplies one empty argument. Handle the no
+	   argument case here. */
+      if ((parm_count == 0) && (actual_count == 1) && (parms_[0] == 0))
+	    return 0;
+
+      if (actual_count > parm_count) {
+	    cerr << get_fileline() << ": error: "
+		 << "Too many arguments (" << actual_count
+		 << ", expecting " << parm_count << ")"
+		 << " in call to function." << endl;
+	    des->errors += 1;
+      }
 
       for (unsigned idx = 0 ; idx < parm_count ; idx += 1) {
 	    unsigned pidx = idx + parm_off;
@@ -2338,7 +2334,7 @@ unsigned PECallFunction::elaborate_arguments_(Design*des, NetScope*scope,
 	    } else if (def->port_defe(pidx)) {
 		  if (! gn_system_verilog()) {
 			cerr << get_fileline() << ": internal error: "
-			     <<"Found (and using) default function argument "
+			     << "Found (and using) default function argument "
 			     << "requires SystemVerilog." << endl;
 			des->errors += 1;
 		  }
@@ -2352,7 +2348,7 @@ unsigned PECallFunction::elaborate_arguments_(Design*des, NetScope*scope,
 
       if (missing_parms > 0) {
 	    cerr << get_fileline() << ": error: The function " << path_
-		 << " has been called with empty parameters." << endl;
+		 << " has been called with missing/empty parameters." << endl;
 	    cerr << get_fileline() << ":      : Verilog doesn't allow "
 		 << "passing empty parameters to functions." << endl;
 	    parm_errors += 1;
@@ -2501,22 +2497,54 @@ NetExpr* PECallFunction::elaborate_expr_method_(Design*des, NetScope*scope,
 
 unsigned PECastSize::test_width(Design*des, NetScope*scope, width_mode_t&)
 {
-      expr_width_ = size_;
+      ivl_assert(*this, size_);
+      ivl_assert(*this, base_);
+
+      NetExpr*size_ex = elab_and_eval(des, scope, size_, -1, true);
+      NetEConst*size_ce = dynamic_cast<NetEConst*>(size_ex);
+      expr_width_ = size_ce ? size_ce->value().as_ulong() : 0;
+      delete size_ex;
+      if (expr_width_ == 0) {
+	    cerr << get_fileline() << ": error: Cast size expression "
+		    "must be constant and greater than zero." << endl;
+	    des->errors += 1;
+	    return 0;
+      }
 
       width_mode_t tmp_mode = PExpr::SIZED;
       base_->test_width(des, scope, tmp_mode);
 
-      return size_;
+      if (!type_is_vectorable(base_->expr_type())) {
+	    cerr << get_fileline() << ": error: Cast base expression "
+		    "must be a vector type." << endl;
+	    des->errors += 1;
+	    return 0;
+      }
+
+      expr_type_   = base_->expr_type();
+      min_width_   = expr_width_;
+      signed_flag_ = base_->has_sign();
+
+      return expr_width_;
 }
 
 NetExpr* PECastSize::elaborate_expr(Design*des, NetScope*scope,
-				    unsigned, unsigned) const
+				    unsigned expr_wid, unsigned flags) const
 {
-      NetExpr*sub = base_->elaborate_expr(des, scope, base_->expr_width(), NO_FLAGS);
-      NetESelect*sel = new NetESelect(sub, 0, size_);
-      sel->set_line(*this);
+      flags &= ~SYS_TASK_ARG; // don't propagate the SYS_TASK_ARG flag
 
-      return sel;
+      ivl_assert(*this, size_);
+      ivl_assert(*this, base_);
+
+      NetExpr*sub = base_->elaborate_expr(des, scope, base_->expr_width(), flags);
+
+	// Perform the cast. The extension method (zero/sign), if needed,
+	// depends on the type of the base expression.
+      NetExpr*tmp = cast_to_width(sub, expr_width_, base_->has_sign(), *this);
+
+	// Pad up to the expression width. The extension method (zero/sign)
+	// depends on the type of enclosing expression.
+      return pad_to_width(tmp, expr_wid, signed_flag_, *this);
 }
 
 unsigned PECastType::test_width(Design*des, NetScope*scope, width_mode_t&wid)
@@ -2620,17 +2648,15 @@ NetExpr* PECastType::elaborate_expr(Design*des, NetScope*scope,
 
           if((base_->expr_type() != IVL_VT_BOOL) &&
                 (base_->expr_type() != IVL_VT_LOGIC)) {
-              cerr << get_fileline() << ": cannot be casted to string." << endl;
+              cerr << get_fileline() << ": cannot be cast to a string." << endl;
               ivl_assert(*this, false);
           }
 
           return expr;
       }
 
-      cerr << get_fileline() << ": sorry: I don't know how to cast expression." << endl;
-      ivl_assert(*this, false);
-
-      return expr;
+      cerr << get_fileline() << ": sorry: This cast operation is not yet supported." << endl;
+      return 0;
 }
 
 unsigned PEConcat::test_width(Design*des, NetScope*scope, width_mode_t&)
@@ -2661,7 +2687,7 @@ unsigned PEConcat::test_width(Design*des, NetScope*scope, width_mode_t&)
 	    expr_is_string = NO;
       }
 
-      expr_type_   = (expr_is_string==YES)? IVL_VT_STRING : IVL_VT_LOGIC;
+      expr_type_   = (expr_is_string==YES) ? IVL_VT_STRING : IVL_VT_LOGIC;
       signed_flag_ = false;
 
 	// If there is a repeat expression, then evaluate the constant
@@ -2822,17 +2848,16 @@ NetExpr* PEConcat::elaborate_expr(Design*des, NetScope*scope,
 	    concat->set(idx, parms[off+idx]);
       }
 
-      if (wid_sum == 0 && concat_depth < 2) {
-	    cerr << get_fileline() << ": error: Concatenation may not "
-	         << "have zero width in this context." << endl;
+      if (wid_sum == 0 && expr_type_ != IVL_VT_STRING) {
+	    cerr << get_fileline() << ": error: Concatenation/replication "
+	         << "may not have zero width in this context." << endl;
 	    des->errors += 1;
 	    concat_depth -= 1;
 	    delete concat;
 	    return 0;
       }
 
-      NetExpr*tmp = pad_to_width(concat, expr_wid, *this);
-      tmp->cast_signed(signed_flag_);
+      NetExpr*tmp = pad_to_width(concat, expr_wid, signed_flag_, *this);
 
       concat_depth -= 1;
       return tmp;
@@ -2872,6 +2897,25 @@ NetExpr* PEFNumber::elaborate_expr(Design*, NetScope*, unsigned, unsigned) const
 bool PEIdent::calculate_packed_indices_(Design*des, NetScope*scope, NetNet*net,
 					list<long>&prefix_indices) const
 {
+      unsigned dimensions = net->unpacked_dimensions() + net->packed_dimensions();
+      switch (net->data_type()) {
+	  case IVL_VT_STRING:
+	  case IVL_VT_DARRAY:
+	  case IVL_VT_QUEUE:
+	    dimensions += 1;
+	  default:
+	    break;
+      }
+      if (path_.back().index.size() > dimensions) {
+	    cerr << get_fileline() << ": error: the number of indices ("
+		 << path_.back().index.size()
+		 << ") is greater than the number of dimensions ("
+		 << dimensions
+		 << ")." << endl;
+	    des->errors += 1;
+	    return false;
+      }
+
       list<index_component_t> index;
       index = path_.back().index;
       ivl_assert(*this, index.size() >= net->unpacked_dimensions());
@@ -2900,7 +2944,7 @@ bool PEIdent::calculate_bits_(Design*des, NetScope*scope,
       NetEConst*msb_c = dynamic_cast<NetEConst*>(msb_ex);
       if (msb_c == 0) {
 	    cerr << index_tail.msb->get_fileline() << ": error: "
-		  "Bit select expressionsmust be constant."
+		  "Bit select expressions must be constant."
 		 << endl;
 	    cerr << index_tail.msb->get_fileline() << ":      : "
                   "This msb expression violates the rule: "
@@ -2996,7 +3040,7 @@ bool PEIdent::calculate_up_do_width_(Design*des, NetScope*scope,
       NetExpr*wid_ex = elab_and_eval(des, scope, index_tail.lsb, -1, true);
       NetEConst*wid_c = dynamic_cast<NetEConst*>(wid_ex);
 
-      wid = wid_c? wid_c->value().as_ulong() : 0;
+      wid = wid_c ? wid_c->value().as_ulong() : 0;
       if (wid == 0) {
 	    cerr << index_tail.lsb->get_fileline() << ": error: "
 		  "Indexed part widths must be constant and greater than zero."
@@ -3145,7 +3189,7 @@ unsigned PEIdent::test_width(Design*des, NetScope*scope, width_mode_t&mode)
 		bool parts_defined;
 		calculate_parts_(des, scope, msb, lsb, parts_defined);
 		if (parts_defined)
-		      use_width = 1 + ((msb>lsb)? (msb-lsb) : (lsb-msb));
+		      use_width = 1 + ((msb>lsb) ? (msb-lsb) : (lsb-msb));
 		else
 		      use_width = UINT_MAX;
 		break;
@@ -3179,7 +3223,7 @@ unsigned PEIdent::test_width(Design*des, NetScope*scope, width_mode_t&mode)
 	    ivl_assert(*this, 0);
       }
 
-      if (const netdarray_t*darray = net? net->darray_type() : 0) {
+      if (const netdarray_t*darray = net ? net->darray_type() : 0) {
 	    switch (use_sel) {
 		case index_component_t::SEL_BIT:
 		case index_component_t::SEL_BIT_LAST:
@@ -3233,7 +3277,7 @@ unsigned PEIdent::test_width(Design*des, NetScope*scope, width_mode_t&mode)
 		       << net->name() << " is a net, "
 		       << "type=" << expr_type_
 		       << ", width=" << expr_width_
-		       << ", signed_=" << (signed_flag_?"true":"false")
+		       << ", signed_=" << (signed_flag_ ? "true" : "false")
 		       << ", use_depth=" << use_depth
 		       << ", packed_dimensions=" << net->packed_dimensions()
 		       << ", unpacked_dimensions=" << net->unpacked_dimensions()
@@ -3466,7 +3510,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
       indices_flags idx_flags;
       indices_to_expressions(des, scope, this,
 			     use_comp.index, net->unpacked_dimensions(),
-			     need_const, net->unpacked_count(),
+			     need_const,
 			     idx_flags,
 			     unpacked_indices,
 			     unpacked_indices_const);
@@ -3730,10 +3774,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
 
             if (!tmp) return 0;
 
-            tmp = pad_to_width(tmp, expr_wid, *this);
-            tmp->cast_signed(signed_flag_);
-
-            return tmp;
+            return pad_to_width(tmp, expr_wid, signed_flag_, *this);
       }
 
 	// If the identifier names a signal (a register or wire)
@@ -3769,10 +3810,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
 		       << ", tmp=" << *tmp << endl;
 	    }
 
-            tmp = pad_to_width(tmp, expr_wid, *this);
-            tmp->cast_signed(signed_flag_);
-
-            return tmp;
+            return pad_to_width(tmp, expr_wid, signed_flag_, *this);
       }
 
 	// If the identifier is a named event
@@ -3819,7 +3857,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
       }
 
 	// Maybe this is a method attached to an enumeration name? If
-	// this is system verilog, then test to see if the name is
+	// this is SystemVerilog, then test to see if the name is
 	// really a method attached to an object.
       if (gn_system_verilog() && found_in==0 && path_.size() >= 2) {
 	    pform_name_t use_path = path_;
@@ -3872,9 +3910,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
 							       member_comp);
 			if (!tmp) return 0;
 
-			tmp = pad_to_width(tmp, expr_wid, *this);
-			tmp->cast_signed(signed_flag_);
-			return tmp;
+			return pad_to_width(tmp, expr_wid, signed_flag_, *this);
 		  }
 
 		  if (net->class_type() != 0) {
@@ -3897,7 +3933,7 @@ NetExpr* PEIdent::elaborate_expr(Design*des, NetScope*scope,
       if ( !(SYS_TASK_ARG & flags) ) {
 	      // I cannot interpret this identifier. Error message.
             cerr << get_fileline() << ": error: Unable to bind "
-                 << (NEED_CONST & flags ? "parameter" : "wire/reg/memory")
+                 << ((NEED_CONST & flags) ? "parameter" : "wire/reg/memory")
                  << " `" << path_ << "' in `" << scope_path(scope) << "'"
                  << endl;
             if (scope->need_const_func()) {
@@ -3991,7 +4027,7 @@ static verinum param_part_select_bits(const verinum&par_val, long wid,
 	// If the input is a string, and the part select is working on
 	// byte boundaries, then make the result into a string.
       if (par_val.is_string() && (labs(lsv)%8 == 0) && (wid%8 == 0))
-	    return result.as_string();
+	    return verinum(result.as_string());
 
       return result;
 }
@@ -4453,7 +4489,7 @@ NetExpr* PEIdent::elaborate_expr_param_(Design*des,
 		       << "Elaborate parameter <" << path_
 		       << "> as enumeration constant." << *etmp << endl;
 	    tmp = etmp->dup_expr();
-            tmp = pad_to_width(tmp, expr_wid, *this);
+            tmp = pad_to_width(tmp, expr_wid, signed_flag_, *this);
 
       } else {
 	    perm_string name = peek_tail_name(path_);
@@ -4539,7 +4575,7 @@ NetExpr* PEIdent::elaborate_expr_net_word_(Design*des, NetScope*scope,
       indices_flags idx_flags;
       indices_to_expressions(des, scope, this,
 			     name_tail.index, net->unpacked_dimensions(),
-			     need_const, net->unpacked_count(),
+			     need_const,
 			     idx_flags,
 			     unpacked_indices,
 			     unpacked_indices_const);
@@ -4628,7 +4664,8 @@ NetExpr* PEIdent::elaborate_expr_net_part_(Design*des, NetScope*scope,
 {
       list<long> prefix_indices;
       bool rc = calculate_packed_indices_(des, scope, net->sig(), prefix_indices);
-      ivl_assert(*this, rc);
+      if (!rc)
+	    return 0;
 
       long msv, lsv;
       bool parts_defined_flag;
@@ -4768,7 +4805,8 @@ NetExpr* PEIdent::elaborate_expr_net_idx_up_(Design*des, NetScope*scope,
 {
       list<long>prefix_indices;
       bool rc = calculate_packed_indices_(des, scope, net->sig(), prefix_indices);
-      ivl_assert(*this, rc);
+      if (!rc)
+	    return 0;
 
       NetExpr*base = calculate_up_do_base_(des, scope, need_const);
 
@@ -4870,7 +4908,8 @@ NetExpr* PEIdent::elaborate_expr_net_idx_do_(Design*des, NetScope*scope,
 {
       list<long>prefix_indices;
       bool rc = calculate_packed_indices_(des, scope, net->sig(), prefix_indices);
-      ivl_assert(*this, rc);
+      if (!rc)
+	    return 0;
 
       NetExpr*base = calculate_up_do_base_(des, scope, need_const);
 
@@ -4958,7 +4997,8 @@ NetExpr* PEIdent::elaborate_expr_net_bit_(Design*des, NetScope*scope,
 {
       list<long>prefix_indices;
       bool rc = calculate_packed_indices_(des, scope, net->sig(), prefix_indices);
-      ivl_assert(*this, rc);
+      if (!rc)
+	    return 0;
 
       const name_component_t&name_tail = path_.back();
       ivl_assert(*this, !name_tail.index.empty());
@@ -4968,6 +5008,8 @@ NetExpr* PEIdent::elaborate_expr_net_bit_(Design*des, NetScope*scope,
       ivl_assert(*this, index_tail.lsb == 0);
 
       NetExpr*mux = elab_and_eval(des, scope, index_tail.msb, -1, need_const);
+      if (!mux)
+	    return 0;
 
       if (const netdarray_t*darray = net->sig()->darray_type()) {
 	      // Special case: This is a select of a dynamic
@@ -5583,7 +5625,7 @@ NetEConst* PENumber::elaborate_expr(Design*, NetScope*,
 unsigned PEString::test_width(Design*, NetScope*, width_mode_t&)
 {
       expr_type_   = IVL_VT_BOOL;
-      expr_width_  = text_? verinum(text_).len() : 0;
+      expr_width_  = text_ ? verinum(text_).len() : 0;
       min_width_   = expr_width_;
       signed_flag_ = false;
 
@@ -5643,7 +5685,6 @@ unsigned PETernary::test_width(Design*des, NetScope*scope, width_mode_t&mode)
       } else if (tru_type == IVL_VT_LOGIC || fal_type == IVL_VT_LOGIC) {
 	    expr_type_ = IVL_VT_LOGIC;
       } else {
-	    ivl_assert(*this, tru_type == fal_type);
 	    expr_type_ = tru_type;
       }
       if (expr_type_ == IVL_VT_REAL) {
@@ -6039,7 +6080,7 @@ NetExpr* PEUnary::elaborate_expr(Design*des, NetScope*scope,
 		  }
 		  tmp->set_line(*this);
 	    }
-            tmp = pad_to_width(tmp, expr_wid, *this);
+            tmp = pad_to_width(tmp, expr_wid, signed_flag_, *this);
 	    break;
 
 	  case '&': // Reduction AND
@@ -6057,7 +6098,7 @@ NetExpr* PEUnary::elaborate_expr(Design*des, NetScope*scope,
 	    }
 	    tmp = new NetEUReduce(op_, ip);
 	    tmp->set_line(*this);
-            tmp = pad_to_width(tmp, expr_wid, *this);
+            tmp = pad_to_width(tmp, expr_wid, signed_flag_, *this);
 	    break;
 
 	  case '~':

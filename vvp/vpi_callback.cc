@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2001-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2001-2016 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -316,7 +316,9 @@ void sync_cb::run_run()
       if (cur->cb_data.cb_rtn != 0) {
 	    assert(vpi_mode_flag == VPI_MODE_NONE);
 	    vpi_mode_flag = sync_flag? VPI_MODE_ROSYNC : VPI_MODE_RWSYNC;
+	    vpip_cur_task = dynamic_cast<__vpiSysTaskCall*>(cur->cb_data.obj);
 	    (cur->cb_data.cb_rtn)(&cur->cb_data);
+	    vpip_cur_task = 0;
 	    vpi_mode_flag = VPI_MODE_NONE;
       }
 
@@ -332,21 +334,14 @@ static sync_callback* make_sync(p_cb_data data, bool readonly_flag)
       cb->handle = obj;
       obj->cb_sync = cb;
 
+      vvp_time64_t tv = 0;
       switch (obj->cb_time.type) {
 	  case vpiSuppressTime:
-	    schedule_generic(cb, 0, true, readonly_flag);
 	    break;
 
 	  case vpiSimTime:
-	      { vvp_time64_t tv = vpip_timestruct_to_time(&obj->cb_time);
-		vvp_time64_t tn = schedule_simtime();
-		if (tv < tn) {
-		      schedule_generic(cb, 0, true, readonly_flag);
-		} else {
-		      schedule_generic(cb, tv - tn, true, readonly_flag);
-		}
-		break;
-	      }
+	    tv = vpip_timestruct_to_time(&obj->cb_time);
+	    break;
 
 	  default:
 	    fprintf(stderr, "Unsupported time type %d.\n",
@@ -354,6 +349,7 @@ static sync_callback* make_sync(p_cb_data data, bool readonly_flag)
 	    assert(0);
 	    break;
       }
+      schedule_generic(cb, tv, true, readonly_flag);
       return obj;
 }
 
@@ -365,7 +361,7 @@ static struct __vpiCallback* make_afterdelay(p_cb_data data, bool simtime_flag)
       cb->handle = obj;
       obj->cb_sync = cb;
 
-      vvp_time64_t tv;
+      vvp_time64_t tv = 0;
       switch (obj->cb_time.type) {
 	  case vpiSimTime:
 	    tv = vpip_timestruct_to_time(&obj->cb_time);
@@ -375,7 +371,6 @@ static struct __vpiCallback* make_afterdelay(p_cb_data data, bool simtime_flag)
 	    fprintf(stderr, "Unsupported time type %d.\n",
 	            (int)obj->cb_time.type);
 	    assert(0);
-	    tv = 0;
 	    break;
       }
 
@@ -625,8 +620,7 @@ void callback_execute(struct __vpiCallback*cur)
 	  case vpiScaledRealTime: {
 	    cur->cb_data.time->real =
 	         vpip_time_to_scaled_real(schedule_simtime(),
-	             (struct __vpiScope *) vpi_handle(vpiScope,
-	                                              cur->cb_data.obj));
+	             (__vpiScope *) vpi_handle(vpiScope, cur->cb_data.obj));
 	    break;
 	  }
 	  case vpiSuppressTime:
@@ -782,7 +776,14 @@ static void real_signal_value(struct t_vpi_value*vp, double rval)
 	    break;
 
 	  case vpiDecStrVal:
+#if !defined(__GNUC__)
+		  if (isnan(rval))
+			  sprintf(rbuf, "%s", "nan");
+		  else
+			  sprintf(rbuf, "%0.0f", rval);
+#else
 	    sprintf(rbuf, "%0.0f", rval);
+#endif
 	    vp->value.str = rbuf;
 	    break;
 

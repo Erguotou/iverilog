@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 1998-2016 Stephen Williams (steve@icarus.com)
  * Copyright CERN 2013 / Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
@@ -36,6 +36,7 @@
 # include  "PEvent.h"
 # include  "PGenerate.h"
 # include  "PPackage.h"
+# include  "PScope.h"
 # include  "PSpec.h"
 # include  "netlist.h"
 # include  "netenum.h"
@@ -49,6 +50,9 @@
 # include  "compiler.h"
 # include  "ivl_assert.h"
 
+
+// Implemented in elab_scope.cc
+extern void set_scope_timescale(Design*des, NetScope*scope, PScope*pscope);
 
 void PGate::elaborate(Design*, NetScope*) const
 {
@@ -104,24 +108,6 @@ void PGAssign::elaborate(Design*des, NetScope*scope) const
 	    des->errors += 1;
 	    return;
       }
-
-#if 0
-	// MTW, 01-Mar-2013. The expression elaboration rework should have
-	// ensured that this can no longer occur. Leaving this here for the
-	// moment, but it should be safe to remove it.
-      if (type_is_vectorable(rval_expr->expr_type())
-	  && type_is_vectorable(lval->data_type())
-	  && rval_expr->expr_width() < lval->vector_width()) {
-	    if (debug_elaborate) {
-		  cerr << get_fileline() << ": debug: "
-		       << "r-value expressions width "<<rval_expr->expr_width()
-		       << " of " << (rval_expr->has_sign()? "signed":"unsigned")
-		       << " expression is to small for l-value width "
-		       << lval->vector_width() << "." << endl;
-	    }
-	    rval_expr = pad_to_width(rval_expr, lval->vector_width(), *this);
-      }
-#endif
 
       NetNet*rval = rval_expr->synthesize(des, scope, rval_expr);
 
@@ -787,7 +773,7 @@ void PGBuiltin::elaborate(Design*des, NetScope*scope) const
 
       if (check_delay_count(des)) return;
       NetExpr* rise_time, *fall_time, *decay_time;
-      eval_delays(des, scope, rise_time, fall_time, decay_time);
+      eval_delays(des, scope, rise_time, fall_time, decay_time, true);
 
       struct attrib_list_t*attrib_list;
       unsigned attrib_list_n = 0;
@@ -1287,15 +1273,18 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
       for (unsigned idx = 0 ;  idx < pins.size() ;  idx += 1) {
 	    bool unconnected_port = false;
 
+	    perm_string port_name = rmod->get_port_name(idx);
+
 	      // Skip unconnected module ports. This happens when a
 	      // null parameter is passed in.
 
 	    if (pins[idx] == 0) {
 
 		  if (pins_fromwc[idx]) {
-			cerr << get_fileline() << ": error: Wildcard named port " <<
-			      "connection (.*) did not find a matching identifier " <<
-			      "for port '" << rmod->ports[idx]->name << "'." << endl;
+			cerr << get_fileline() << ": error: Wildcard named "
+			        "port connection (.*) did not find a matching "
+			        "identifier for port " << (idx+1) << " ("
+			     << port_name << ")." << endl;
 			des->errors += 1;
 			return;
 		  }
@@ -1330,22 +1319,22 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			      break;
 			}
 
-			  // Print a waring for an unconnected input.
+			  // Print a warning for an unconnected input.
 			if (warn_portbinding) {
 			      cerr << get_fileline() << ": warning: "
 				   << "Instantiating module "
 				   << rmod->mod_name()
-				   << " with dangling input port '"
-				   << rmod->ports[idx]->name;
+				   << " with dangling input port "
+				   << (idx+1) << " (" << port_name;
 			      switch (rmod->uc_drive) {
 				  case Module::UCD_PULL0:
-				    cerr << "' (pulled low)." << endl;
+				    cerr << ") pulled low." << endl;
 				    break;
 				  case Module::UCD_PULL1:
-				    cerr << "' (pulled high)." << endl;
+				    cerr << ") pulled high." << endl;
 				    break;
 				  case Module::UCD_NONE:
-				    cerr << "' (floating)." << endl;
+				    cerr << ") floating." << endl;
 				    break;
 			      }
 			}
@@ -1361,8 +1350,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 
 	    if (debug_elaborate) {
 		  cerr << get_fileline() << ": debug: " << get_name()
-		       << ": Port " << (idx+1) << " has " << prts.size()
-		       << " sub-ports." << endl;
+		       << ": Port " << (idx+1) << " (" << port_name
+		       << ") has " << prts.size() << " sub-ports." << endl;
 	    }
 
 	      // Count the internal vector bits of the port.
@@ -1394,7 +1383,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			prt_vector_width += port_width;
 			ptype = PortType::merged(netnet->port_type(), ptype);
 		  }
-		  inst_scope->add_module_port_info(idx, rmod->get_port_name(idx), ptype, prt_vector_width );
+		  inst_scope->add_module_port_info(idx, port_name, ptype, prt_vector_width );
 	    }
 
 	      // If I find that the port is unconnected inside the
@@ -1418,12 +1407,23 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		       << prts[0]->name() << " is coerced to inout." << endl;
 	    }
 
+	    if (!prts.empty() && (prts[0]->port_type() == NetNet::POUTPUT)
+                && (prts[0]->type() != NetNet::REG)
+                && prts[0]->pin(0).nexus()->has_floating_input()
+                && pins[idx]->is_collapsible_net(des, scope)) {
+                  prts[0]->port_type(NetNet::PINOUT);
+
+		  cerr << pins[idx]->get_fileline() << ": warning: output port "
+		       << prts[0]->name() << " is coerced to inout." << endl;
+	    }
+
 	      // Elaborate the expression that connects to the
 	      // module[s] port. sig is the thing outside the module
 	      // that connects to the port.
 
 	    NetNet*sig = 0;
-	    if (prts.empty() || (prts[0]->port_type() == NetNet::PINPUT)) {
+	    NetNet::PortType ptype = prts[0]->port_type();
+	    if (prts.empty() || (ptype == NetNet::PINPUT)) {
 
 		    // Special case: If the input port is an unpacked
 		    // array, then there should be no sub-ports and
@@ -1454,8 +1454,9 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  NetExpr*tmp_expr = elab_and_eval(des, scope, pins[idx], -1);
 		  if (tmp_expr == 0) {
 			cerr << pins[idx]->get_fileline()
-			     << ": internal error: Port expression "
-			     << "too complicated for elaboration." << endl;
+			     << ": error: Failed to elaborate port expression."
+			     << endl;
+			des->errors += 1;
 			continue;
 		  }
 
@@ -1515,7 +1516,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 					   sig->vector_width());
 		  }
 
-	    } else if (prts[0]->port_type() == NetNet::PINOUT) {
+	    } else if (ptype == NetNet::PINOUT) {
 
 		    // For now, do not support unpacked array outputs.
 		  ivl_assert(*this, prts[0]->unpacked_dimensions()==0);
@@ -1541,8 +1542,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			cerr << pins[idx]->get_fileline() << ": error: "
 			     << "Inout port expression must support "
 			     << "continuous assignment." << endl;
-			cerr << pins[idx]->get_fileline() << ":      : "
-			     << "Port " << rmod->ports[idx]->name << " of "
+			cerr << pins[idx]->get_fileline() << ":      : Port "
+			     << (idx+1) << " (" << port_name << ") of "
 			     << rmod->mod_name() << " is connected to "
 			     << *pins[idx] << endl;
 			des->errors += 1;
@@ -1555,9 +1556,9 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		      !prts.empty() && (prts[0]->data_type() != IVL_VT_REAL )) {
 			cerr << pins[idx]->get_fileline() << ": error: "
 			     << "Cannot automatically connect bit based "
-			        "inout port " << rmod->ports[idx]->name
-			     << " of module " << rmod->mod_name() << " to real "
-			        "signal " << sig->name() << "." << endl;
+			        "inout port " << (idx+1) << " (" << port_name
+			     << ") of module " << rmod->mod_name()
+			     << " to real signal " << sig->name() << "." << endl;
 			des->errors += 1;
 			continue;
 		  }
@@ -1566,9 +1567,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  if (!prts.empty() && (prts[0]->data_type() == IVL_VT_REAL )) {
 			cerr << pins[idx]->get_fileline() << ": error: "
 			     << "No support for connecting real inout ports ("
-			        "port "
-			     << rmod->ports[idx]->name << " of module "
-			     << rmod->mod_name() << ")." << endl;
+			        "port " << (idx+1) << " (" << port_name
+			     << ") of module " << rmod->mod_name() << ")." << endl;
 			des->errors += 1;
 			continue;
 		  }
@@ -1577,11 +1577,11 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 	    } else {
 
 		    /* Port type must be OUTPUT here. */
-		  ivl_assert(*this, prts[0]->port_type() == NetNet::POUTPUT);
+		  ivl_assert(*this, ptype == NetNet::POUTPUT);
 
 		    // Special case: If the output port is an unpacked
 		    // array, then there should be no sub-ports and
-		    // the passed pexxpression is processed
+		    // the passed port expression is processed
 		    // differently. Note that we are calling it the
 		    // "r-value" expression, but since this is an
 		    // output port, we assign to it from the internal object.
@@ -1611,8 +1611,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			cerr << pins[idx]->get_fileline() << ": error: "
 			     << "Output port expression must support "
 			     << "continuous assignment." << endl;
-			cerr << pins[idx]->get_fileline() << ":      : "
-			     << "Port " << rmod->ports[idx]->name << " of "
+			cerr << pins[idx]->get_fileline() << ":      : Port "
+			     << (idx+1) << " (" << port_name << ") of "
 			     << rmod->mod_name() << " is connected to "
 			     << *pins[idx] << endl;
 			des->errors += 1;
@@ -1640,11 +1640,9 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			}
 			prts_vector_width = sig->vector_width();
 			for (unsigned pidx = 0; pidx < prts.size(); pidx += 1) {
-			      prts[pidx]->port_type(NetNet::NOT_A_PORT);
 			      prts[pidx] = cast_to_int4(des, scope, prts[pidx],
 			                               prts_vector_width /
 			                               instance.size());
-			      prts[pidx]->port_type(NetNet::POUTPUT);
 			}
 		  }
 
@@ -1653,9 +1651,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  if ((sig->data_type() == IVL_VT_REAL ) &&
 		      !prts.empty() && (prts[0]->data_type() != IVL_VT_REAL )) {
 			prts_vector_width -= prts[0]->vector_width() - 1;
-			prts[0]->port_type(NetNet::NOT_A_PORT);
 			prts[0] = cast_to_real(des, scope, prts[0]);
-			prts[0]->port_type(NetNet::POUTPUT);
 			  // No support for multiple real drivers.
 			if (instance.size() != 1) {
 			      cerr << pins[idx]->get_fileline() << ": error: "
@@ -1673,10 +1669,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  if ((sig->data_type() == IVL_VT_BOOL ) &&
 		      !prts.empty() && (prts[0]->data_type() == IVL_VT_LOGIC )) {
 			for (unsigned pidx = 0; pidx < prts.size(); pidx += 1) {
-			      prts[pidx]->port_type(NetNet::NOT_A_PORT);
 			      prts[pidx] = cast_to_int2(des, scope, prts[pidx],
 			                                prts[pidx]->vector_width());
-			      prts[pidx]->port_type(NetNet::POUTPUT);
 			}
 		  }
 
@@ -1687,8 +1681,8 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		      instance.size() != 1) {
 			cerr << pins[idx]->get_fileline() << ": error: "
 			     << "An arrayed instance of " << rmod->mod_name()
-			     << " cannot have a real port ("
-			     << rmod->ports[idx]->name << ") connected to a "
+			     << " cannot have a real port (port " << (idx+1)
+			     << " : " << port_name << ") connected to a "
 			        "real signal (" << sig->name() << ")." << endl;
 			des->errors += 1;
 			continue;
@@ -1700,7 +1694,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 
 #ifndef NDEBUG
 	    if ((! prts.empty())
-		&& (prts[0]->port_type() != NetNet::PINPUT)) {
+		&& (ptype != NetNet::PINPUT)) {
 		  assert(sig->type() != NetNet::REG);
 	    }
 #endif
@@ -1721,8 +1715,9 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 
 	    if (debug_elaborate) {
 		  cerr << get_fileline() << ": debug: " << get_name()
-		       << ": Port " << (idx+1) << " has vector width of "
-		       << prts_vector_width << "." << endl;
+		       << ": Port " << (idx+1) << " (" << port_name
+		       << ") has vector width of " << prts_vector_width
+		       << "." << endl;
 	    }
 
 	      // Check that the parts have matching pin counts. If
@@ -1730,12 +1725,9 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 	      // based, but users count parameter positions from 1.
 	    if ((instance.size() == 1)
 		&& (prts_vector_width != sig->vector_width())) {
-		  const char *tmp3 = rmod->ports[idx]->name.str();
 		  bool as_signed = false;
 
-		  if (tmp3 == 0) tmp3 = "???";
-
-		  switch (prts[0]->port_type()) {
+		  switch (ptype) {
 		    case NetNet::POUTPUT:
 			as_signed = prts[0]->get_signed();
 			break;
@@ -1754,12 +1746,12 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  }
 
 		  cerr << get_fileline() << ": warning: Port " << (idx+1)
-		       << " (" << tmp3 << ") of "
+		       << " (" << port_name << ") of "
 		       << type_ << " expects " << prts_vector_width <<
 			" bits, got " << sig->vector_width() << "." << endl;
 
 		    // Delete this when inout ports pad correctly.
-		  if (prts[0]->port_type() == NetNet::PINOUT) {
+		  if (ptype == NetNet::PINOUT) {
 		     if (prts_vector_width > sig->vector_width()) {
 			cerr << get_fileline() << ":        : Leaving "
 			     << (prts_vector_width-sig->vector_width())
@@ -1779,7 +1771,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 			     << " high bits of the port."
 			     << endl;
 		  } else {
-			if (prts[0]->port_type() == NetNet::PINPUT) {
+			if (ptype == NetNet::PINPUT) {
 			      cerr << get_fileline() << ":        : Pruning ";
 			} else {
 			      cerr << get_fileline() << ":        : Padding ";
@@ -1791,7 +1783,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  }
 
 		  sig = resize_net_to_port_(des, scope, sig, prts_vector_width,
-					    prts[0]->port_type(), as_signed);
+					    ptype, as_signed);
 	    }
 
 	      // Connect the sig expression that is the context of the
@@ -1842,7 +1834,7 @@ void PGModule::elaborate_mod_(Design*des, Module*rmod, NetScope*scope) const
 		  for (unsigned ldx = 0 ;  ldx < prts.size() ;  ldx += 1)
 			connect(prts[ldx]->pin(0), sig->pin(0));
 
-	    } else switch (prts[0]->port_type()) {
+	    } else switch (ptype) {
 		case NetNet::POUTPUT:
 		  ctmp = new NetConcat(scope, scope->local_symbol(),
 				       prts_vector_width, prts.size());
@@ -1999,7 +1991,7 @@ void PGModule::elaborate_udp_(Design*des, PUdp*udp, NetScope*scope) const
 		  PDelays tmp_del;
 		  tmp_del.set_delays(overrides_, false);
 		  tmp_del.eval_delays(des, scope, rise_expr, fall_expr,
-		                      decay_expr);
+		                      decay_expr, true);
 	    }
       }
 
@@ -2324,7 +2316,8 @@ NetExpr* PAssign_::elaborate_rval_(Design*des, NetScope*scope,
 NetExpr* PAssign_::elaborate_rval_(Design*des, NetScope*scope,
 				   ivl_type_t lv_net_type,
 				   ivl_variable_type_t lv_type,
-				   unsigned lv_width) const
+				   unsigned lv_width,
+				   bool force_unsigned) const
 {
       ivl_assert(*this, rval_);
 
@@ -2333,7 +2326,7 @@ NetExpr* PAssign_::elaborate_rval_(Design*des, NetScope*scope,
 	// should look into fixing calls to this method to pass a
 	// net_type instead of the separate lv_width/lv_type values.
       NetExpr*rv = elaborate_rval_expr(des, scope, lv_net_type, lv_type, lv_width,
-				       rval(), is_constant_);
+				       rval(), is_constant_, force_unsigned);
 
       if (!is_constant_ || !rv) return rv;
 
@@ -2451,10 +2444,35 @@ NetProc* PAssign::elaborate_compressed_(Design*des, NetScope*scope) const
       NetAssign_*lv = elaborate_lval(des, scope);
       if (lv == 0) return 0;
 
-      NetExpr*rv = elaborate_rval_(des, scope, 0, lv->expr_type(), count_lval_width(lv));
+	// Compressed assignments should behave identically to the
+	// equivalent uncompressed assignments. This means we need
+	// to take the type of the LHS into account when determining
+	// the type of the RHS expression.
+      bool force_unsigned;
+      switch (op_) {
+	  case 'l':
+	  case 'r':
+	  case 'R':
+	      // The right-hand operand of shift operations is
+	      // self-determined.
+	    force_unsigned = false;
+	    break;
+	  default:
+	    force_unsigned = !lv->get_signed();
+	    break;
+      }
+      NetExpr*rv = elaborate_rval_(des, scope, 0, lv->expr_type(),
+				   count_lval_width(lv), force_unsigned);
       if (rv == 0) return 0;
 
-      NetAssign*cur = new NetAssign(lv, op_, rv);
+	// The ivl_target API doesn't support signalling the type
+	// of a lval, so convert arithmetic shifts into logical
+	// shifts now if the lval is unsigned.
+      char op = op_;
+      if ((op == 'R') && !lv->get_signed())
+	    op = 'r';
+
+      NetAssign*cur = new NetAssign(lv, op, rv);
       cur->set_line(*this);
 
       return cur;
@@ -2676,11 +2694,16 @@ NetProc* PAssign::elaborate(Design*des, NetScope*scope) const
 	    return bl;
       }
 
-      if (lv->enumeration() &&
-          ! lv->enumeration()->matches(rv->enumeration())) {
-	    cerr << get_fileline() << ": error: "
-		 << "Enumeration type mismatch in assignment." << endl;
-	    des->errors += 1;
+      if (lv->enumeration()) {
+	    if (! rv->enumeration()) {
+		  cerr << get_fileline() << ": error: "
+		          "This assignment requires an explicit cast." << endl;
+		  des->errors += 1;
+	    } else if (! lv->enumeration()->matches(rv->enumeration())) {
+		  cerr << get_fileline() << ": error: "
+		          "Enumeration type mismatch in assignment." << endl;
+		  des->errors += 1;
+	    }
       }
 
       NetAssign*cur = new NetAssign(lv, rv);
@@ -2867,13 +2890,26 @@ NetProc* PBlock::elaborate(Design*des, NetScope*scope) const
 		  des->errors += 1;
 		  return 0;
 	    }
-
 	    assert(nscope);
-
-	    elaborate_behaviors_(des, nscope);
       }
 
       NetBlock*cur = new NetBlock(type, nscope);
+
+      if (nscope) {
+	      // Handle any variable initialization statements in this scope.
+	      // For automatic scopes these statements need to be executed
+	      // each time the block is entered, so add them to the main
+	      // block. For static scopes, put them in a separate process
+	      // that will be executed at the start of simulation.
+	    if (nscope->is_auto()) {
+		  for (unsigned idx = 0; idx < var_inits.size(); idx += 1) {
+			NetProc*tmp = var_inits[idx]->elaborate(des, nscope);
+			if (tmp) cur->append(tmp);
+		  }
+	    } else {
+		  elaborate_var_inits_(des, nscope);
+	    }
+      }
 
       if (nscope == 0)
 	    nscope = scope;
@@ -3727,7 +3763,7 @@ NetProc* PCallTask::elaborate_build_call_(Design*des, NetScope*scope,
 
 	    NetExpr*rv = 0;
 
-	    if (parms_idx<parms_.size() && parms_[parms_idx]) {
+	    if (parms_idx < parms_.size() && parms_[parms_idx]) {
 		  rv = elaborate_rval_expr(des, scope, port->net_type(),
 					   lv_type, wid, parms_ [parms_idx]);
 		  if (NetEEvent*evt = dynamic_cast<NetEEvent*> (rv)) {
@@ -3742,7 +3778,7 @@ NetProc* PCallTask::elaborate_build_call_(Design*des, NetScope*scope,
 		  if (! gn_system_verilog()) {
 			cerr << get_fileline() << ": internal error: "
 			     << "Found (and using) default task expression "
-			     << " requires SystemVerilog." << endl;
+			        "requires SystemVerilog." << endl;
 			des->errors += 1;
 		  }
 		  rv = def->port_defe(idx);
@@ -3777,7 +3813,9 @@ NetProc* PCallTask::elaborate_build_call_(Design*des, NetScope*scope,
 	   expression that can be a target to a procedural
 	   assignment, including a memory word. */
 
-      for (unsigned idx = 0 ;  idx < parm_count ;  idx += 1) {
+      for (unsigned idx = use_this?1:0 ;  idx < parm_count ;  idx += 1) {
+
+	    size_t parms_idx = use_this? idx-1 : idx;
 
 	    NetNet*port = def->port(idx);
 
@@ -3789,20 +3827,24 @@ NetProc* PCallTask::elaborate_build_call_(Design*des, NetScope*scope,
 
 	      /* Elaborate an l-value version of the port expression
 		 for output and inout ports. If the expression does
-		 not exist then quietly skip it, but if the expression
-		 is not a valid l-value print an error message. Note
-		 that the elaborate_lval method already printed a
-		 detailed message. */
-	    NetAssign_*lv;
-	    if (parms_[idx]) {
-		  lv = parms_[idx]->elaborate_lval(des, scope, false, false);
+		 not exist or is not a valid l-value print an error
+		 message. Note that the elaborate_lval method already
+		 printed a detailed message for the latter case. */
+	    NetAssign_*lv = 0;
+	    if (parms_idx < parms_.size() && parms_[parms_idx]) {
+		  lv = parms_[parms_idx]->elaborate_lval(des, scope, false, false);
 		  if (lv == 0) {
-			cerr << parms_[idx]->get_fileline() << ": error: "
+			cerr << parms_[parms_idx]->get_fileline() << ": error: "
 			     << "I give up on task port " << (idx+1)
-			     << " expression: " << *parms_[idx] << endl;
+			     << " expression: " << *parms_[parms_idx] << endl;
 		  }
-	    } else {
-		  lv = 0;
+	    } else if (port->port_type() == NetNet::POUTPUT) {
+		    // Output ports were skipped earlier, so
+		    // report the error now.
+		  cerr << get_fileline() << ": error: "
+		       << "Missing argument " << (idx+1)
+		       << " of call to task." << endl;
+		  des->errors += 1;
 	    }
 
 	    if (lv == 0)
@@ -4034,9 +4076,18 @@ NetProc* PDisable::elaborate(Design*des, NetScope*scope) const
  */
 NetProc* PDoWhile::elaborate(Design*des, NetScope*scope) const
 {
-      NetExpr*tmp = elab_and_eval(des, scope, cond_, -1);
-      tmp->set_line(*this);
-      NetDoWhile*loop = new NetDoWhile(tmp, statement_->elaborate(des, scope));
+      NetExpr*ce = elab_and_eval(des, scope, cond_, -1);
+      NetProc*sub;
+      if (statement_)
+	    sub = statement_->elaborate(des, scope);
+      else
+	    sub = new NetBlock(NetBlock::SEQU, 0);
+      if (ce == 0 || sub == 0) {
+	    delete ce;
+	    delete sub;
+	    return 0;
+      }
+      NetDoWhile*loop = new NetDoWhile(ce, sub);
       loop->set_line(*this);
       return loop;
 }
@@ -4567,7 +4618,11 @@ NetProc* PEventStatement::elaborate(Design*des, NetScope*scope) const
  */
 NetProc* PForever::elaborate(Design*des, NetScope*scope) const
 {
-      NetProc*stat = statement_->elaborate(des, scope);
+      NetProc*stat;
+      if (statement_)
+	    stat = statement_->elaborate(des, scope);
+      else
+	    stat = new NetBlock(NetBlock::SEQU, 0);
       if (stat == 0) return 0;
 
       NetForever*proc = new NetForever(stat);
@@ -4773,7 +4828,11 @@ NetProc* PForeach::elaborate(Design*des, NetScope*scope) const
 
 	/* Elaborate the statement that is contained in the foreach
 	   loop. */
-      NetProc*sub = statement_->elaborate(des, scope);
+      NetProc*sub;
+      if (statement_)
+	    sub = statement_->elaborate(des, scope);
+      else
+	    sub = new NetBlock(NetBlock::SEQU, 0);
 
 	/* Make a step statement: idx += 1 */
       NetAssign_*idx_lv = new NetAssign_(idx_sig);
@@ -4804,7 +4863,11 @@ NetProc* PForeach::elaborate_static_array_(Design*des, NetScope*scope,
       ivl_assert(*this, index_vars_.size() > 0);
       ivl_assert(*this, dims.size() == index_vars_.size());
 
-      NetProc*sub = statement_->elaborate(des, scope);
+      NetProc*sub;
+      if (statement_)
+	    sub = statement_->elaborate(des, scope);
+      else
+	    sub = new NetBlock(NetBlock::SEQU, 0);
       NetForLoop*stmt = 0;
 
       for (int idx_idx = index_vars_.size()-1 ; idx_idx >= 0 ; idx_idx -= 1) {
@@ -4889,7 +4952,7 @@ NetProc* PForStatement::elaborate(Design*des, NetScope*scope) const
 					 sig->data_type(), sig->vector_width(),
 					 expr1_);
 
-      if (debug_elaborate) {
+      if (debug_elaborate && initial_expr) {
 	    cerr << get_fileline() << ": debug: FOR initial assign: "
 		 << sig->name() << " = " << *initial_expr << endl;
       }
@@ -4898,36 +4961,35 @@ NetProc* PForStatement::elaborate(Design*des, NetScope*scope) const
 	   loop. If there is an error, this will return 0 and I should
 	   skip the append. No need to worry, the error has been
 	   reported so it's OK that the netlist is bogus. */
-      NetProc*sub = statement_->elaborate(des, scope);
-
+      NetProc*sub;
+      if (statement_)
+	    sub = statement_->elaborate(des, scope);
+      else
+	    sub = new NetBlock(NetBlock::SEQU, 0);
 
 	/* Now elaborate the for_step statement. I really should do
 	   some error checking here to make sure the step statement
 	   really does step the variable. */
-      if (debug_elaborate) {
-	    cerr << get_fileline() << ": debug: Elaborate for_step statement "
-		 << sig->name() << " = " << *initial_expr << endl;
-      }
-
       NetProc*step = step_->elaborate(des, scope);
-
 
 	/* Elaborate the condition expression. Try to evaluate it too,
 	   in case it is a constant. This is an interesting case
 	   worthy of a warning. */
       NetExpr*ce = elab_and_eval(des, scope, cond_, -1);
-      if (ce == 0) {
-	    delete sub;
-	    delete step;
-	    return 0;
-      }
-
       if (dynamic_cast<NetEConst*>(ce)) {
 	    cerr << get_fileline() << ": warning: condition expression "
 		  "of for-loop is constant." << endl;
       }
 
-
+	/* Error recovery - if we failed to elaborate any of the loop
+	   expressions, give up now. */
+      if (initial_expr == 0 || ce == 0 || step == 0 || sub == 0) {
+	    delete initial_expr;
+	    delete ce;
+	    delete step;
+	    delete sub;
+	    return 0;
+      }
 	/* All done, build up the loop. */
 
       NetForLoop*loop = new NetForLoop(sig, initial_expr, ce, sub, step);
@@ -4972,7 +5034,6 @@ void PFunction::elaborate(Design*des, NetScope*scope) const
 	    des->errors += 1;
 	    return;
       }
-
       assert(def);
 
       ivl_assert(*this, statement_);
@@ -4983,6 +5044,31 @@ void PFunction::elaborate(Design*des, NetScope*scope) const
             scope->is_const_func(true); // error recovery
 	    des->errors += 1;
 	    return;
+      }
+
+	// Handle any variable initialization statements in this scope.
+	// For automatic functions, these statements need to be executed
+	// each time the function is called, so insert them at the start
+	// of the elaborated definition. For static functions, put them
+	// in a separate process that will be executed before the start
+	// of simulation.
+      if (is_auto_) {
+	      // Get the NetBlock of the statement. If it is not a
+	      // NetBlock then create one to wrap the initialization
+	      // statements and the original statement.
+	    NetBlock*blk = dynamic_cast<NetBlock*> (st);
+	    if ((blk == 0) && (var_inits.size() > 0)) {
+		  blk = new NetBlock(NetBlock::SEQU, scope);
+		  blk->set_line(*this);
+		  blk->append(st);
+		  st = blk;
+	    }
+	    for (unsigned idx = var_inits.size(); idx > 0; idx -= 1) {
+		  NetProc*tmp = var_inits[idx-1]->elaborate(des, scope);
+		  if (tmp) blk->prepend(tmp);
+	    }
+      } else {
+	    elaborate_var_inits_(des, scope);
       }
 
       def->set_proc(st);
@@ -5025,7 +5111,11 @@ NetProc* PRepeat::elaborate(Design*des, NetScope*scope) const
       if (expr->expr_type() == IVL_VT_REAL)
 	    expr = cast_to_int4(expr, 64);
 
-      NetProc*stat = statement_->elaborate(des, scope);
+      NetProc*stat;
+      if (statement_)
+	    stat = statement_->elaborate(des, scope);
+      else
+	    stat = new NetBlock(NetBlock::SEQU, 0);
       if (stat == 0) return 0;
 
 	// If the expression is a constant, handle certain special
@@ -5143,11 +5233,6 @@ NetProc* PReturn::elaborate(Design*des, NetScope*scope) const
 
 void PTask::elaborate(Design*des, NetScope*task) const
 {
-	// Elaborate any processes that are part of this scope that
-	// aren't the definition itself. This can happen, for example,
-	// with variable initialization statements in this scope.
-      elaborate_behaviors_(des, task);
-
       NetTaskDef*def = task->task_def();
       assert(def);
 
@@ -5164,6 +5249,31 @@ void PTask::elaborate(Design*des, NetScope*task) const
 		       << " at " << get_fileline() << "." << endl;
 		  return;
 	    }
+      }
+
+	// Handle any variable initialization statements in this scope.
+	// For automatic tasks , these statements need to be executed
+	// each time the task is called, so insert them at the start
+	// of the elaborated definition. For static tasks, put them
+	// in a separate process that will be executed before the start
+	// of simulation.
+      if (is_auto_) {
+	      // Get the NetBlock of the statement. If it is not a
+	      // NetBlock then create one to wrap the initialization
+	      // statements and the original statement.
+	    NetBlock*blk = dynamic_cast<NetBlock*> (st);
+	    if ((blk == 0) && (var_inits.size() > 0)) {
+		  blk = new NetBlock(NetBlock::SEQU, task);
+		  blk->set_line(*this);
+		  blk->append(st);
+		  st = blk;
+	    }
+	    for (unsigned idx = var_inits.size(); idx > 0; idx -= 1) {
+		  NetProc*tmp = var_inits[idx-1]->elaborate(des, task);
+		  if (tmp) blk->prepend(tmp);
+	    }
+      } else {
+	    elaborate_var_inits_(des, task);
       }
 
       def->set_proc(st);
@@ -5204,9 +5314,18 @@ NetProc* PTrigger::elaborate(Design*des, NetScope*scope) const
  */
 NetProc* PWhile::elaborate(Design*des, NetScope*scope) const
 {
-      NetExpr*tmp = elab_and_eval(des, scope, cond_, -1);
-      tmp->set_line(*this);
-      NetWhile*loop = new NetWhile(tmp, statement_->elaborate(des, scope));
+      NetExpr*ce = elab_and_eval(des, scope, cond_, -1);
+      NetProc*sub;
+      if (statement_)
+	    sub = statement_->elaborate(des, scope);
+      else
+	    sub = new NetBlock(NetBlock::SEQU, 0);
+      if (ce == 0 || sub == 0) {
+	    delete ce;
+	    delete sub;
+	    return 0;
+      }
+      NetWhile*loop = new NetWhile(ce, sub);
       loop->set_line(*this);
       return loop;
 }
@@ -5613,6 +5732,10 @@ bool Module::elaborate(Design*des, NetScope*scope) const
 	    (*gt)->elaborate(des, scope);
       }
 
+	// Elaborate the variable initialization statements, making a
+	// single initial process out of them.
+      result_flag &= elaborate_var_inits_(des, scope);
+
 	// Elaborate the behaviors, making processes out of them. This
 	// involves scanning the PProcess* list, creating a NetProcTop
 	// for each process.
@@ -5690,6 +5813,9 @@ bool PGenerate::elaborate(Design*des, NetScope*container) const
 		  "generate " << scheme_type
 		 << " elaborating in scope " << scope_path(container)
 		 << "." << endl;
+	    cerr << get_fileline() << ": PGenerate::elaborate: "
+		  "generate scope_name=" << scope_name
+		 << ", id_number=" << id_number << endl;
       }
 
 	// Handle the special case that this is a CASE scheme. In this
@@ -5724,6 +5850,7 @@ bool PGenerate::elaborate(Design*des, NetScope*container) const
 	      // scheme defined in the Verilog-2005 standard.
 	    const char*name = scope_name.str();
 	    if (name[0] == '$') {
+
 		  if (!scope->auto_name("genblk", '0', name + 4)) {
 			cerr << get_fileline() << ": warning: Couldn't build"
 			     << " unique name for unnamed generate block"
@@ -5799,6 +5926,8 @@ bool PGenerate::elaborate_(Design*des, NetScope*scope) const
       for (gates_it_t cur = gates.begin() ; cur != gates.end() ; ++ cur )
 	    (*cur)->elaborate(des, scope);
 
+      elaborate_var_inits_(des, scope);
+
       typedef list<PProcess*>::const_iterator proc_it_t;
       for (proc_it_t cur = behaviors.begin(); cur != behaviors.end(); ++ cur )
 	    (*cur)->elaborate(des, scope);
@@ -5832,6 +5961,44 @@ bool PScope::elaborate_behaviors_(Design*des, NetScope*scope) const
       }
 
       return result_flag;
+}
+
+bool LexicalScope::elaborate_var_inits_(Design*des, NetScope*scope) const
+{
+      if (var_inits.size() == 0)
+	    return true;
+
+      NetProc*proc = 0;
+      if (var_inits.size() == 1) {
+	    proc = var_inits[0]->elaborate(des, scope);
+      } else {
+	    NetBlock*blk = new NetBlock(NetBlock::SEQU, 0);
+	    bool flag = true;
+	    for (unsigned idx = 0; idx < var_inits.size(); idx += 1) {
+		  NetProc*tmp = var_inits[idx]->elaborate(des, scope);
+		  if (tmp)
+			blk->append(tmp);
+		  else
+			flag = false;
+	    }
+	    if (flag) proc = blk;
+      }
+      if (proc == 0)
+	    return false;
+
+      NetProcTop*top = new NetProcTop(scope, IVL_PR_INITIAL, proc);
+      if (const LineInfo*li = dynamic_cast<const LineInfo*>(this)) {
+	    top->set_line(*li);
+      }
+      if (gn_system_verilog()) {
+	    top->attribute(perm_string::literal("_ivl_schedule_init"),
+			   verinum(1));
+      }
+      des->add_process(top);
+
+      scope->set_var_init(proc);
+
+      return true;
 }
 
 class elaborate_package_t : public elaborator_work_item_t {
@@ -5889,7 +6056,7 @@ class elaborate_root_scope_t : public elaborator_work_item_t {
 
 class top_defparams : public elaborator_work_item_t {
     public:
-      top_defparams(Design*des__)
+      explicit top_defparams(Design*des__)
       : elaborator_work_item_t(des__)
       { }
 
@@ -5920,7 +6087,7 @@ class top_defparams : public elaborator_work_item_t {
 
 class later_defparams : public elaborator_work_item_t {
     public:
-      later_defparams(Design*des__)
+      explicit later_defparams(Design*des__)
       : elaborator_work_item_t(des__)
       { }
 
@@ -6067,6 +6234,7 @@ Design* elaborate(list<perm_string>roots)
 	    ivl_assert(*pac->second, pac->first == pac->second->pscope_name());
 	    NetScope*scope = des->make_package_scope(pac->first);
 	    scope->set_line(pac->second);
+	    set_scope_timescale(des, scope, pac->second);
 
 	    elaborator_work_item_t*es = new elaborate_package_t(des, scope, pac->second);
 	    des->elaboration_work_list.push_back(es);
@@ -6103,11 +6271,7 @@ Design* elaborate(list<perm_string>roots)
 	      // Collect some basic properties of this scope from the
 	      // Module definition.
 	    scope->set_line(rmod);
-	    scope->time_unit(rmod->time_unit);
-	    scope->time_precision(rmod->time_precision);
-	    scope->time_from_timescale(rmod->time_from_timescale);
-	    des->set_precision(rmod->time_precision);
-
+	    set_scope_timescale(des, scope, rmod);
 
 	      // Save this scope, along with its definition, in the
 	      // "root_elems" list for later passes.

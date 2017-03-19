@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2000-2016 Stephen Williams (steve@icarus.com)
  * Copyright CERN 2013 / Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
@@ -103,6 +103,13 @@ inline const char*dlerror(void)
 { return strerror( errno ); }
 #endif
 
+ivl_scope_s::ivl_scope_s()
+{
+      func_type = IVL_VT_NO_TYPE;
+      func_signed = false;
+      func_width = 0;
+}
+
 /*
  * The custom new operator for the ivl_nexus_s type allows us to
  * allocate nexus objects in blocks. There are generally lots of them
@@ -150,13 +157,6 @@ void ivl_net_const_s::operator delete(void*, size_t)
 }
 
 static StringHeapLex net_const_strings;
-
-inline static const char *basename(ivl_scope_t scope, const char *inst)
-{
-      inst += strlen(ivl_scope_name(scope));
-      assert(*inst == '.');
-      return inst+1;
-}
 
 static perm_string make_scope_name(const hname_t&name)
 {
@@ -596,6 +596,28 @@ void dll_target::make_scope_param_expr(ivl_parameter_t cur_par, NetExpr*etmp)
       expr_ = 0;
 }
 
+static void fill_in_scope_function(ivl_scope_t scope, const NetScope*net)
+{
+      scope->type_ = IVL_SCT_FUNCTION;
+      const NetFuncDef*def = net->func_def();
+      assert(def);
+
+      const NetNet*return_sig = def->return_sig();
+      if (return_sig == 0) {
+	      // Special case: If there is no return signal, this is
+	      // apparently a VOID function.
+	    scope->func_type = IVL_VT_VOID;
+	    scope->func_signed = 0;
+	    scope->func_width = 0;
+      } else {
+	    scope->func_type = return_sig->data_type();
+	    scope->func_signed = return_sig->get_signed();
+	    scope->func_width = return_sig->vector_width();
+      }
+
+      scope->tname_ = def->scope()->basename();
+}
+
 void dll_target::add_root(const NetScope *s)
 {
       ivl_scope_t root_ = new struct ivl_scope_s;
@@ -642,7 +664,7 @@ void dll_target::add_root(const NetScope *s)
 	  }
 	    break;
 	  case NetScope::FUNC:
-	    root_->type_ = IVL_SCT_FUNCTION;
+	    fill_in_scope_function(root_, s);
 	    break;
 	  default:
 	    assert(0);
@@ -1057,19 +1079,16 @@ void dll_target::logic(const NetLogic*net)
       obj->npins_ = net->pin_count();
       obj->pins_ = new ivl_nexus_t[obj->npins_];
 
-      ivl_nexus_ptr_t out_ptr = 0;
-
       for (unsigned idx = 0 ;  idx < obj->npins_ ;  idx += 1) {
 	    const Nexus*nex = net->pin(idx).nexus();
 	    assert(nex->t_cookie());
 	    obj->pins_[idx] = nex->t_cookie();
 	    ivl_nexus_ptr_t tmp = nexus_log_add(obj->pins_[idx], obj, idx);
-	    if (idx == 0)
-		  out_ptr = tmp;
+	    if (idx == 0) {
+		  tmp->drive0 = net->pin(0).drive0();
+		  tmp->drive1 = net->pin(0).drive1();
+	    }
       }
-
-      out_ptr->drive0 = net->pin(0).drive0();
-      out_ptr->drive1 = net->pin(0).drive1();
 
       assert(net->scope());
       ivl_scope_t scop = find_scope(des_, net->scope());
@@ -1941,6 +1960,9 @@ void dll_target::lpm_ff(const NetFF*net)
 
       const Nexus*nex;
 
+	/* Set the clock polarity. */
+      obj->u_.ff.negedge_flag = net->is_negedge();
+
 	/* Set the clk signal to point to the nexus, and the nexus to
 	   point back to this device. */
       nex = net->pin_Clock().nexus();
@@ -1979,7 +2001,10 @@ void dll_target::lpm_ff(const NetFF*net)
 	    nexus_lpm_add(obj->u_.ff.aset, obj, 0, IVL_DR_HiZ, IVL_DR_HiZ);
 
 	    verinum tmp = net->aset_value();
-	    obj->u_.ff.aset_value = expr_from_value_(tmp);
+	    if (tmp.len() > 0)
+		  obj->u_.ff.aset_value = expr_from_value_(tmp);
+	    else
+		  obj->u_.ff.aset_value = 0;
 
       } else {
 	    obj->u_.ff.aset = 0;
@@ -2004,7 +2029,10 @@ void dll_target::lpm_ff(const NetFF*net)
 	    nexus_lpm_add(obj->u_.ff.sset, obj, 0, IVL_DR_HiZ, IVL_DR_HiZ);
 
 	    verinum tmp = net->sset_value();
-	    obj->u_.ff.sset_value = expr_from_value_(tmp);
+	    if (tmp.len() > 0)
+		  obj->u_.ff.sset_value = expr_from_value_(tmp);
+	    else
+		  obj->u_.ff.sset_value = 0;
 
       } else {
 	    obj->u_.ff.sset = 0;
@@ -2021,6 +2049,39 @@ void dll_target::lpm_ff(const NetFF*net)
       assert(nex->t_cookie());
       obj->u_.ff.d.pin = nex->t_cookie();
       nexus_lpm_add(obj->u_.ff.d.pin, obj, 0, IVL_DR_HiZ, IVL_DR_HiZ);
+}
+
+void dll_target::lpm_latch(const NetLatch*net)
+{
+      ivl_lpm_t obj = new struct ivl_lpm_s;
+      obj->type  = IVL_LPM_LATCH;
+      obj->name  = net->name();
+      obj->scope = find_scope(des_, net->scope());
+      assert(obj->scope);
+      FILE_NAME(obj, net);
+
+      obj->width = net->width();
+
+      scope_add_lpm(obj->scope, obj);
+
+      const Nexus*nex;
+
+      nex = net->pin_Enable().nexus();
+      assert(nex->t_cookie());
+      obj->u_.latch.e = nex->t_cookie();
+      assert(obj->u_.latch.e);
+      nexus_lpm_add(obj->u_.latch.e, obj, 0, IVL_DR_HiZ, IVL_DR_HiZ);
+
+      nex = net->pin_Q().nexus();
+      assert(nex->t_cookie());
+      obj->u_.latch.q.pin = nex->t_cookie();
+      nexus_lpm_add(obj->u_.latch.q.pin, obj, 0,
+		    IVL_DR_STRONG, IVL_DR_STRONG);
+
+      nex = net->pin_Data().nexus();
+      assert(nex->t_cookie());
+      obj->u_.latch.d.pin = nex->t_cookie();
+      nexus_lpm_add(obj->u_.latch.d.pin, obj, 0, IVL_DR_HiZ, IVL_DR_HiZ);
 }
 
 /*
@@ -2509,8 +2570,7 @@ void dll_target::scope(const NetScope*net)
 		      break;
 		}
 		case NetScope::FUNC:
-		  scop->type_ = IVL_SCT_FUNCTION;
-		  scop->tname_ = net->func_def()->scope()->basename();
+		  fill_in_scope_function(scop, net);
 		  break;
 		case NetScope::BEGIN_END:
 		  scop->type_ = IVL_SCT_BEGIN;

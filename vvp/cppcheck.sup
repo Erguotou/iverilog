@@ -1,3 +1,7 @@
 // The new() operator is always used to allocate space for this class and
 // pool is defined there.
 uninitVar:vvp_net.cc:167
+
+// These functions are not used by Icarus
+// __libvpi_c_dummy_function()
+unusedFunction:libvpi.c:24

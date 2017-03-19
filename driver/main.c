@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2000-2016 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -44,7 +44,7 @@ const char HELP[] =
 "                [-M [mode=]depfile] [-m module]\n"
 "                [-N file] [-o filename] [-p flag=value]\n"
 "                [-s topmodule] [-t target] [-T min|typ|max]\n"
-"                [-W class] [-y dir] [-Y suf] source_file(s)\n"
+"                [-W class] [-y dir] [-Y suf] [-l file] source_file(s)\n"
 "\n"
 "See the man page for details.";
 
@@ -128,6 +128,7 @@ const char*gen_icarus = "icarus-misc";
 const char*gen_io_range_error = "io-range-error";
 const char*gen_strict_ca_eval = "no-strict-ca-eval";
 const char*gen_strict_expr_width = "no-strict-expr-width";
+const char*gen_shared_loop_index = "shared-loop-index";
 const char*gen_verilog_ams = "no-verilog-ams";
 
 /* Boolean: true means use a default include dir, false means don't */
@@ -496,6 +497,7 @@ static void process_warning_switch(const char*name)
       if (strcmp(name,"all") == 0) {
 	    process_warning_switch("anachronisms");
 	    process_warning_switch("implicit");
+	    process_warning_switch("implicit-dimensions");
 	    process_warning_switch("portbind");
 	    process_warning_switch("select-range");
 	    process_warning_switch("timescale");
@@ -503,9 +505,15 @@ static void process_warning_switch(const char*name)
       } else if (strcmp(name,"anachronisms") == 0) {
 	    if (! strchr(warning_flags, 'n'))
 		  strcat(warning_flags, "n");
+      } else if (strcmp(name,"floating-nets") == 0) {
+	    if (! strchr(warning_flags, 'f'))
+		  strcat(warning_flags, "f");
       } else if (strcmp(name,"implicit") == 0) {
 	    if (! strchr(warning_flags, 'i'))
 		  strcat(warning_flags, "i");
+      } else if (strcmp(name,"implicit-dimensions") == 0) {
+	    if (! strchr(warning_flags, 'd'))
+		  strcat(warning_flags, "d");
       } else if (strcmp(name,"portbind") == 0) {
 	    if (! strchr(warning_flags, 'p'))
 		  strcat(warning_flags, "p");
@@ -532,8 +540,20 @@ static void process_warning_switch(const char*name)
 		  cp[0] = cp[1];
 		  cp += 1;
 	    }
+      } else if (strcmp(name,"no-floating-nets") == 0) {
+	    char*cp = strchr(warning_flags, 'f');
+	    if (cp) while (*cp) {
+		  cp[0] = cp[1];
+		  cp += 1;
+	    }
       } else if (strcmp(name,"no-implicit") == 0) {
 	    char*cp = strchr(warning_flags, 'i');
+	    if (cp) while (*cp) {
+		  cp[0] = cp[1];
+		  cp += 1;
+	    }
+      } else if (strcmp(name,"no-implicit-dimensions") == 0) {
+	    char*cp = strchr(warning_flags, 'd');
 	    if (cp) while (*cp) {
 		  cp[0] = cp[1];
 		  cp += 1;
@@ -568,6 +588,9 @@ static void process_warning_switch(const char*name)
 		  cp[0] = cp[1];
 		  cp += 1;
 	    }
+      } else {
+	    fprintf(stderr, "Ignoring unknown warning class "
+		    "%s\n", name);
       }
 }
 
@@ -717,6 +740,12 @@ static int process_generation(const char*name)
       else if (strcmp(name,"no-strict-expr-width") == 0)
 	    gen_strict_expr_width = "no-strict-expr-width";
 
+      else if (strcmp(name,"shared-loop-index") == 0)
+	    gen_shared_loop_index = "shared-loop-index";
+
+      else if (strcmp(name,"no-shared-loop-index") == 0)
+	    gen_shared_loop_index = "no-shared-loop-index";
+
       else if (strcmp(name,"verilog-ams") == 0)
 	    gen_verilog_ams = "verilog-ams";
 
@@ -742,7 +771,8 @@ static int process_generation(const char*name)
 		            "    icarus-misc | no-icarus-misc\n"
 		            "    io-range-error | no-io-range-error\n"
 		            "    strict-ca-eval | no-strict-ca-eval\n"
-		            "    strict-expr-width | no-strict-expr-width\n");
+		            "    strict-expr-width | no-strict-expr-width\n"
+		            "    shared-loop-index | no-shared-loop-index\n");
 
 	    return 1;
       }
@@ -795,57 +825,107 @@ static void add_sft_file(const char *module)
       free(file);
 }
 
+static void find_ivl_root_failed(const char *reason)
+{
+      fprintf(stderr, "Cannot locate IVL modules : %s\n", reason);
+      exit(1);
+}
+
+static void find_ivl_root(void)
+{
+#ifdef __MINGW32__
+      const char *ivl_lib_prefix = "\\lib";
+      const char *ivl_lib_suffix = "\\ivl" IVL_SUFFIX;
+#else
+      const char *ivl_lib_prefix = IVL_LIB;
+      const char *ivl_lib_suffix = "/ivl" IVL_SUFFIX;
+#endif
+      ssize_t len = 0;
+      char *s;
+
+#ifndef __MINGW32__
+	/* First try the location specified in the build process. */
+      if (access(IVL_ROOT, F_OK) != -1) {
+	    assert(strlen(IVL_ROOT) < sizeof ivl_root);
+	    strcpy(ivl_root, IVL_ROOT);
+	    return;
+      }
+#endif
+	/* If that fails, calculate the ivl_root from the path to the
+	   command. This is always necessary on Windows because of the
+	   installation process, but may also be necessary on other OSs
+	   if the package has been relocated.
+
+	   On Windows we know the command path is formed like this:
+
+		$(prefix)\bin\iverilog.exe
+
+	   The module path in a Windows installation is the path:
+
+		$(prefix)\lib\ivl$(suffix)
+
+	   so we chop the file name and the last directory by
+	   turning the last two \ characters to null. Then we append
+	   the lib\ivl$(suffix) to finish.
+
+	   On other OSs, we expect the command path to be:
+
+		$(prefix)/bin/iverilog
+
+	   and the module path to be:
+
+		$(prefix)/$(lib)/ivl$(suffix)
+
+	   so we extract the $(prefix) from the command location as for
+	   Windows and the $(lib) from IVL_LIB. This will of course fail
+	   if the user has overridden $(bindir) or $(libdir), but there's
+	   not a lot we can do in that case.
+ */
+#ifdef __MINGW32__
+      char tmppath[MAXSIZE];
+      len = GetModuleFileName(NULL, tmppath, sizeof tmppath);
+      if (len >= (ssize_t) sizeof ivl_root) {
+	    find_ivl_root_failed("command path exceeds size of string buffer.");
+      }
+	/* Convert to a short name to remove any embedded spaces. */
+      len = GetShortPathName(tmppath, ivl_root, sizeof ivl_root);
+#else
+      len = readlink("/proc/self/exe", ivl_root, sizeof ivl_root);
+#endif
+      if (len >= (ssize_t) sizeof ivl_root) {
+	    find_ivl_root_failed("command path exceeds size of string buffer.");
+      }
+      if (len <= 0) {
+	    find_ivl_root_failed("couldn't get command path from OS.");
+      }
+      s = strrchr(ivl_root, sep);
+      if (s == 0) {
+	    find_ivl_root_failed("missing first separator in command path.");
+      }
+      *s = 0;
+      s = strrchr(ivl_root, sep);
+      if (s == 0) {
+	    find_ivl_root_failed("missing second separator in command path.");
+      }
+      *s = 0;
+      len = s - ivl_root;
+      s = strrchr(ivl_lib_prefix, sep);
+      assert(s);
+      if (len + strlen(s) + strlen(ivl_lib_suffix) >= (ssize_t) sizeof ivl_root) {
+	    find_ivl_root_failed("module path exceeds size of string buffer.");
+      }
+      strcat(ivl_root, s);
+      strcat(ivl_root, ivl_lib_suffix);
+}
+
 int main(int argc, char **argv)
 {
       int e_flag = 0;
       int version_flag = 0;
       int opt;
 
-#ifdef __MINGW32__
-	/* Calculate the ivl_root from the path to the command. This
-	   is necessary because of the installation process on
-	   Windows. Mostly, it is those darn drive letters, but oh
-	   well. We know the command path is formed like this:
-
-		D:\iverilog\bin\iverilog.exe
-
-	   The module path in a Windows installation is the path:
-
-		D:\iverilog\lib\ivl$(suffix)
-
-	   so we chop the file name and the last directory by
-	   turning the last two \ characters to null. Then we append
-	   the lib\ivl$(suffix) to finish. */
-      char *s;
-      char tmppath[MAXSIZE];
-      GetModuleFileName(NULL, tmppath, sizeof tmppath);
-	/* Convert to a short name to remove any embedded spaces. */
-      GetShortPathName(tmppath, ivl_root, sizeof ivl_root);
-      s = strrchr(ivl_root, sep);
-      if (s) *s = 0;
-      else {
-	    fprintf(stderr, "%s: Missing first %c in exe path!\n",
-	                    argv[0], sep);
-	    exit(1);
-      }
-      s = strrchr(ivl_root, sep);
-      if (s) *s = 0;
-      else {
-	    fprintf(stderr, "%s: Missing second %c in exe path!\n",
-	                    argv[0], sep);
-	    exit(1);
-      }
-      strcat(ivl_root, "\\lib\\ivl" IVL_SUFFIX);
-
+      find_ivl_root();
       base = ivl_root;
-
-#else
-        /* In a UNIX environment, the IVL_ROOT from the Makefile is
-	   dependable. It points to the $prefix/lib/ivl directory,
-	   where the sub-parts are installed. */
-      strcpy(ivl_root, IVL_ROOT);
-      base = ivl_root;
-#endif
 
 	/* Create a temporary file for communicating input parameters
 	   to the preprocessor. */
@@ -907,7 +987,7 @@ int main(int argc, char **argv)
 	}
       }
 
-      while ((opt = getopt(argc, argv, "B:c:D:d:Ef:g:hI:M:m:N:o:P:p:Ss:T:t:vVW:y:Y:")) != EOF) {
+      while ((opt = getopt(argc, argv, "B:c:D:d:Ef:g:hl:I:M:m:N:o:P:p:Ss:T:t:vVW:y:Y:")) != EOF) {
 
 	    switch (opt) {
 		case 'B':
@@ -960,6 +1040,10 @@ int main(int argc, char **argv)
 
 		case 'I':
 		  process_include_dir(optarg);
+		  break;
+
+		case 'l':
+		  process_file_name(optarg, 1);
 		  break;
 
 		case 'M':
@@ -1044,17 +1128,8 @@ int main(int argc, char **argv)
 
       if (version_flag || verbose_flag) {
 	    printf("Icarus Verilog version " VERSION " (" VERSION_TAG ")\n\n");
-	    printf("Copyright 1998-2013 Stephen Williams\n\n");
+	    printf("Copyright 1998-2015 Stephen Williams\n\n");
 	    puts(NOTICE);
-      }
-
-      if (synth_flag) {
-	    fprintf(stderr, "Warning: Synthesis is not currently being "
-	                    "maintained and may not\n");
-	    fprintf(stderr, "         function correctly. V0.8 was the "
-	                    "last release branch to\n");
-	    fprintf(stderr, "         have active synthesis development "
-	                    "and support!\n");
       }
 
 	/* Make a common conf file path to reflect the target. */
@@ -1069,6 +1144,7 @@ int main(int argc, char **argv)
 	   how to handle them. */
       fprintf(iconfig_file, "sys_func:%s%csystem.sft\n", base, sep);
       fprintf(iconfig_file, "sys_func:%s%cvhdl_sys.sft\n", base, sep);
+      fprintf(iconfig_file, "sys_func:%s%cvhdl_textio.sft\n", base, sep);
 
 	/* If verilog-2005/09/12 is enabled or icarus-misc or verilog-ams,
 	 * then include the v2005_math library. */
@@ -1104,6 +1180,7 @@ int main(int argc, char **argv)
       fprintf(iconfig_file, "generation:%s\n", gen_io_range_error);
       fprintf(iconfig_file, "generation:%s\n", gen_strict_ca_eval);
       fprintf(iconfig_file, "generation:%s\n", gen_strict_expr_width);
+      fprintf(iconfig_file, "generation:%s\n", gen_shared_loop_index);
       fprintf(iconfig_file, "generation:%s\n", gen_verilog_ams);
       fprintf(iconfig_file, "generation:%s\n", gen_icarus);
       fprintf(iconfig_file, "warnings:%s\n", warning_flags);

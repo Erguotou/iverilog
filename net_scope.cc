@@ -1,5 +1,6 @@
 /*
- * Copyright (c) 2000-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2000-2016 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2016 CERN Michele Castellana (michele.castellana@cern.ch)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -23,6 +24,7 @@
 # include  "netlist.h"
 # include  "netclass.h"
 # include  "netenum.h"
+# include  "netvector.h"
 # include  <cstring>
 # include  <cstdlib>
 # include  <sstream>
@@ -139,6 +141,7 @@ NetScope::NetScope(NetScope*up, const hname_t&n, NetScope::TYPE t, bool nest,
 	    time_from_timescale_ = false;
       }
 
+      var_init_ = 0;
       switch (t) {
 	  case NetScope::TASK:
 	    task_ = 0;
@@ -161,6 +164,8 @@ NetScope::NetScope(NetScope*up, const hname_t&n, NetScope::TYPE t, bool nest,
       lineno_ = 0;
       def_lineno_ = 0;
       genvar_tmp_val = 0;
+      tie_hi_ = 0;
+      tie_lo_ = 0;
 }
 
 NetScope::~NetScope()
@@ -264,19 +269,20 @@ bool NetScope::auto_name(const char*prefix, char pad, const char* suffix)
       assert(self != up_->children_.end());
       assert(self->second == this);
 
-      char tmp[32];
-      int pad_pos = strlen(prefix);
-      int max_pos = sizeof(tmp) - strlen(suffix) - 1;
-      strncpy(tmp, prefix, sizeof(tmp));
-      tmp[31] = 0;
+	// This is to keep the pad attempts from being stuck in some
+	// sort of infinite loop. This should not be a practical
+	// limit, but an extreme one.
+      const size_t max_pad_attempts = 32 + strlen(prefix);
+
+      string use_prefix = prefix;
 
 	// Try a variety of potential new names. Make sure the new
 	// name is not in the parent scope. Keep looking until we are
 	// sure we have a unique name, or we run out of names to try.
-      while (pad_pos <= max_pos) {
+      while (use_prefix.size() <= max_pad_attempts) {
 	      // Try this name...
-	    strcat(tmp + pad_pos, suffix);
-	    hname_t new_name(lex_strings.make(tmp));
+	    string tmp = use_prefix + suffix;
+	    hname_t new_name(lex_strings.make(tmp.c_str()), name_.peek_numbers());
 	    if (!up_->child(new_name)) {
 		    // Ah, this name is unique. Rename myself, and
 		    // change my name in the parent scope.
@@ -285,7 +291,9 @@ bool NetScope::auto_name(const char*prefix, char pad, const char* suffix)
 		  up_->children_[name_] = this;
 		  return true;
 	    }
-	    tmp[pad_pos++] = pad;
+
+	      // Name collides, so try a different name.
+	    use_prefix = use_prefix + pad;
       }
       return false;
 }
@@ -374,6 +382,8 @@ NetScope::param_ref_t NetScope::find_parameter(perm_string key)
 	// To get here the parameter must already exist, so we should
 	// never get here.
       assert(0);
+	// But return something to avoid a compiler warning.
+      return idx;
 }
 
 NetScope::TYPE NetScope::type() const
@@ -499,6 +509,7 @@ void NetScope::add_module_port_info( unsigned idx, perm_string name, PortType::E
                                 unsigned long width )
 {
       assert(type_ == MODULE);
+      assert(ports_.size() > idx);
       PortInfo &info = ports_[idx];
       info.name = name;
       info.type = ptype;
@@ -738,4 +749,34 @@ perm_string NetScope::local_symbol()
       ostringstream res;
       res << "_s" << (lcounter_++);
       return lex_strings.make(res.str());
+}
+
+void NetScope::add_tie_hi(Design*des)
+{
+      if (tie_hi_ == 0) {
+	    NetNet*sig = new NetNet(this, lex_strings.make("_LOGIC1"),
+				    NetNet::WIRE, &netvector_t::scalar_logic);
+	    sig->local_flag(true);
+
+	    tie_hi_ = new NetLogic(this, local_symbol(),
+				   1, NetLogic::PULLUP, 1);
+	    des->add_node(tie_hi_);
+
+	    connect(sig->pin(0), tie_hi_->pin(0));
+      }
+}
+
+void NetScope::add_tie_lo(Design*des)
+{
+      if (tie_lo_ == 0) {
+	    NetNet*sig = new NetNet(this, lex_strings.make("_LOGIC0"),
+				    NetNet::WIRE, &netvector_t::scalar_logic);
+	    sig->local_flag(true);
+
+	    tie_lo_ = new NetLogic(this, local_symbol(),
+				   1, NetLogic::PULLDOWN, 1);
+	    des->add_node(tie_lo_);
+
+	    connect(sig->pin(0), tie_lo_->pin(0));
+      }
 }

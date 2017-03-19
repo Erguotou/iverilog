@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1998-2013 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 1998-2016 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -175,6 +175,7 @@ bool NetPins::pins_are_virtual(void) const
 NetPins::NetPins(unsigned npins)
 : npins_(npins)
 {
+      default_dir_ = Link::PASSIVE;
       pins_ = NULL;  // Wait until someone asks.
       if (disable_virtual_pins) devirtualize_pins();  // Ask.  Bummer.
 }
@@ -557,7 +558,7 @@ void NetNet::calculate_slice_widths_from_packed_dims_(void)
       ivl_assert(*this, ! slice_wids_.empty());
       slice_wids_[0] = netrange_width(slice_dims_);
       vector<netrange_t>::const_iterator cur = slice_dims_.begin();
-      for (size_t idx = 1 ; idx < slice_wids_.size() ; idx += 1) {
+      for (size_t idx = 1 ; idx < slice_wids_.size() ; idx += 1, ++cur) {
 	    slice_wids_[idx] = slice_wids_[idx-1] / cur->width();
       }
 }
@@ -1021,11 +1022,36 @@ NetProc::~NetProc()
 NetProcTop::NetProcTop(NetScope*s, ivl_process_type_t t, NetProc*st)
 : type_(t), statement_(st), scope_(s)
 {
+      synthesized_design_ = 0;
 }
 
 NetProcTop::~NetProcTop()
 {
+      if (!synthesized_design_) {
+	    delete statement_;
+	    return;
+      }
+
+      NexusSet nex_set;
+      statement_->nex_output(nex_set);
+
       delete statement_;
+
+      bool flag = false;
+      for (unsigned idx = 0 ;  idx < nex_set.size() ;  idx += 1) {
+
+	    NetNet*net = nex_set[idx].lnk.nexus()->pick_any_net();
+	    if (net->peek_lref() > 0) {
+		  cerr << get_fileline() << ": warning: '" << net->name()
+		       << "' is driven by more than one process." << endl;
+		  flag = true;
+	    }
+      }
+      if (flag) {
+	    cerr << get_fileline() << ": sorry: Cannot synthesize signals "
+		    "that are driven by more than one process." << endl;
+	    synthesized_design_->errors += 1;
+      }
 }
 
 NetProc* NetProcTop::statement()
@@ -1153,8 +1179,8 @@ unsigned NetReplicate::repeat() const
  *     ...
  */
 
-NetFF::NetFF(NetScope*s, perm_string n, unsigned width__)
-: NetNode(s, n, 8), width_(width__)
+NetFF::NetFF(NetScope*s, perm_string n, bool negedge__, unsigned width__)
+: NetNode(s, n, 8), negedge_(negedge__), width_(width__)
 {
       pin_Clock().set_dir(Link::INPUT);
       pin_Enable().set_dir(Link::INPUT);
@@ -1168,6 +1194,11 @@ NetFF::NetFF(NetScope*s, perm_string n, unsigned width__)
 
 NetFF::~NetFF()
 {
+}
+
+bool NetFF::is_negedge() const
+{
+      return negedge_;
 }
 
 unsigned NetFF::width() const
@@ -1275,6 +1306,60 @@ const verinum& NetFF::sset_value() const
       return sset_value_;
 }
 
+/*
+ * The NetLatch class represents an LPM_LATCH device. The pinout is assigned
+ * like so:
+ *    0  -- Enable
+ *    1  -- Data
+ *    2  -- Q
+ */
+
+NetLatch::NetLatch(NetScope*s, perm_string n, unsigned width__)
+: NetNode(s, n, 3), width_(width__)
+{
+      pin_Enable().set_dir(Link::INPUT);
+      pin_Data().set_dir(Link::INPUT);
+      pin_Q().set_dir(Link::OUTPUT);
+}
+
+NetLatch::~NetLatch()
+{
+}
+
+unsigned NetLatch::width() const
+{
+      return width_;
+}
+
+Link& NetLatch::pin_Enable()
+{
+      return pin(0);
+}
+
+const Link& NetLatch::pin_Enable() const
+{
+      return pin(0);
+}
+
+Link& NetLatch::pin_Data()
+{
+      return pin(1);
+}
+
+const Link& NetLatch::pin_Data() const
+{
+      return pin(1);
+}
+
+Link& NetLatch::pin_Q()
+{
+      return pin(2);
+}
+
+const Link& NetLatch::pin_Q() const
+{
+      return pin(2);
+}
 
 NetAbs::NetAbs(NetScope*s, perm_string n, unsigned w)
 : NetNode(s, n, 2), width_(w)
@@ -2738,10 +2823,11 @@ DelayType NetCase::delay_type() const
 
       for (unsigned idx = 0; idx < nstmts; idx += 1) {
 	    if (!expr(idx)) def_stmt = true;
+	    DelayType dt = stat(idx) ? stat(idx)->delay_type() : NO_DELAY;
             if (idx == 0) {
-		  result = stat(idx)->delay_type();
+		  result = dt;
             } else {
-		  result = combine_delays(result, stat(idx)->delay_type());
+		  result = combine_delays(result, dt);
             }
       }
 
@@ -2764,6 +2850,7 @@ DelayType NetCondit::delay_type() const
  */
 DelayType NetDoWhile::delay_type() const
 {
+      ivl_assert(*this, proc_);
       return proc_->delay_type();
 }
 
@@ -2774,11 +2861,13 @@ DelayType NetEvWait::delay_type() const
 
 DelayType NetForever::delay_type() const
 {
+      ivl_assert(*this, statement_);
       return statement_->delay_type();
 }
 
 DelayType NetForLoop::delay_type() const
 {
+      ivl_assert(*this, statement_);
       return get_loop_delay_type(condition_, statement_);
 }
 
@@ -2801,6 +2890,7 @@ DelayType NetPDelay::delay_type() const
 
 DelayType NetRepeat::delay_type() const
 {
+      ivl_assert(*this, statement_);
       return get_loop_delay_type(expr_, statement_);
 }
 
@@ -2816,5 +2906,6 @@ DelayType NetUTask::delay_type() const
 
 DelayType NetWhile::delay_type() const
 {
+      ivl_assert(*this, proc_);
       return get_loop_delay_type(cond_, proc_);
 }

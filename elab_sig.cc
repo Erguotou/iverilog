@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2000-2015 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2000-2016 Stephen Williams (steve@icarus.com)
  * Copyright CERN 2012 / Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
@@ -715,16 +715,23 @@ void PTaskFunc::elaborate_sig_ports_(Design*des, NetScope*scope,
 		  continue;
 	    }
 
-	      // If the port has a default expression that can be used
-	      // as a value when the caller doesn't bind, then
-	      // elaborate that expression here. This expression
-	      // should evaluate down do a constant.
+	      // If the port has a default expression, elaborate
+	      // that expression here.
 	    if (ports_->at(idx).defe != 0) {
-		  tmp_def = elab_and_eval(des, scope, ports_->at(idx).defe, -1, true);
-		  if (tmp_def==0) {
-			cerr << get_fileline() << ": error: Unable to evaluate "
-			     << *ports_->at(idx).defe
-			     << " as a port default (constant) expression." << endl;
+		  if (tmp->port_type() == NetNet::PINPUT) {
+			tmp_def = elab_and_eval(des, scope, ports_->at(idx).defe,
+						-1, scope->need_const_func());
+			if (tmp_def == 0) {
+			      cerr << get_fileline()
+				   << ": error: Unable to evaluate "
+				   << *ports_->at(idx).defe
+				   << " as a port default expression." << endl;
+			      des->errors += 1;
+			}
+		  } else {
+			cerr << get_fileline() << ": sorry: Default arguments "
+			        "for subroutine output or inout ports are not "
+			        "yet supported." << endl;
 			des->errors += 1;
 		  }
 	    }
@@ -909,6 +916,11 @@ bool test_ranges_eeq(const vector<netrange_t>&lef, const vector<netrange_t>&rig)
  */
 NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
 {
+	// This sets the vector or array dimension size that will
+	// cause a warning. For now, these warnings are permanently
+	// enabled.
+      const long warn_dimension_size = 1 << 30;
+
       NetNet::Type wtype = type_;
       bool is_implicit_scalar = false;
       if (wtype == NetNet::IMPLICIT) {
@@ -964,6 +976,23 @@ NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
       }
 
       if (port_set_ || net_set_) {
+
+	    if (warn_implicit_dimensions
+		&& port_set_ && net_set_
+		&& net_.empty() && !port_.empty()) {
+		  cerr << get_fileline() << ": warning: "
+		       << "var/net declaration of " << basename()
+		       << " inherits dimensions from port declaration." << endl;
+	    }
+
+	    if (warn_implicit_dimensions
+		&& port_set_ && net_set_
+		&& port_.empty() && !net_.empty()) {
+		  cerr << get_fileline() << ": warning: "
+		       << "Port declaration of " << basename()
+		       << " inherits dimensions from var/net." << endl;
+	    }
+
 	    bool bad_range = false;
 	    vector<netrange_t> plist, nlist;
 	    /* If they exist get the port definition MSB and LSB */
@@ -1042,7 +1071,11 @@ NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
 
 	    packed_dimensions = nlist;
 	    wid = netrange_width(packed_dimensions);
-
+	    if (wid > warn_dimension_size) {
+		  cerr << get_fileline() << ": warning: Vector size "
+		          "is greater than " << warn_dimension_size
+		       << "." << endl;
+	    }
       }
 
       unsigned nattrib = 0;
@@ -1116,6 +1149,11 @@ NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
 		  index_l = lval.as_long();
 		  index_r = rval.as_long();
 	    }
+	    if (abs(index_r - index_l) > warn_dimension_size) {
+		  cerr << get_fileline() << ": warning: Array dimension "
+		          "is greater than " << warn_dimension_size
+		       << "." << endl;
+	    }
 
 	    unpacked_dimensions.push_back(netrange_t(index_l, index_r));
       }
@@ -1147,6 +1185,14 @@ NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
 
       NetLogic*pull = 0;
       if (wtype == NetNet::SUPPLY0 || wtype == NetNet::SUPPLY1) {
+	    if (debug_elaborate) {
+		  cerr << get_fileline() << ": debug: "
+		       << "Generate a SUPPLY pull for the ";
+		  if (wtype == NetNet::SUPPLY0) cerr << "supply0";
+		  else cerr << "supply1";
+		  cerr << " net." << endl;
+	    }
+
 	    NetLogic::TYPE pull_type = (wtype==NetNet::SUPPLY1)
 		  ? NetLogic::PULLUP
 		  : NetLogic::PULLDOWN;
@@ -1157,14 +1203,6 @@ NetNet* PWire::elaborate_sig(Design*des, NetScope*scope) const
 	    pull->pin(0).drive1(IVL_DR_SUPPLY);
 	    des->add_node(pull);
 	    wtype = NetNet::WIRE;
-
-	    if (debug_elaborate) {
-		  cerr << get_fileline() << ": debug: "
-		       << "Generate a SUPPLY pull for the ";
-		  if (wtype == NetNet::SUPPLY0) cerr << "supply0";
-		  else cerr << "supply1";
-		  cerr << " net." << endl;
-	    }
       }
 
 

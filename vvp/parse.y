@@ -1,7 +1,7 @@
 
 %{
 /*
- * Copyright (c) 2001-2013 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 2001-2016 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -72,7 +72,7 @@ static struct __vpiModPath*modpath_dst = 0;
       int      vpi_enum;
 };
 
-%token K_A K_ALIAS K_ALIAS_R K_APV
+%token K_A K_APV
 %token K_ARITH_ABS K_ARITH_DIV K_ARITH_DIV_R K_ARITH_DIV_S K_ARITH_MOD
 %token K_ARITH_MOD_R K_ARITH_MOD_S
 %token K_ARITH_MULT K_ARITH_MULT_R K_ARITH_SUB K_ARITH_SUB_R
@@ -83,9 +83,10 @@ static struct __vpiModPath*modpath_dst = 0;
 %token K_CMP_EEQ K_CMP_EQ K_CMP_EQX K_CMP_EQZ
 %token K_CMP_EQ_R K_CMP_NEE K_CMP_NE K_CMP_NE_R
 %token K_CMP_GE K_CMP_GE_R K_CMP_GE_S K_CMP_GT K_CMP_GT_R K_CMP_GT_S
-%token K_CONCAT K_CONCAT8 K_DEBUG K_DELAY K_DFF K_DFF_ACLR K_DFF_ASET
+%token K_CONCAT K_CONCAT8 K_DEBUG K_DELAY K_DFF_N K_DFF_N_ACLR
+%token K_DFF_N_ASET K_DFF_P K_DFF_P_ACLR K_DFF_P_ASET
 %token K_ENUM2 K_ENUM2_S K_ENUM4 K_ENUM4_S K_EVENT K_EVENT_OR
-%token K_EXPORT K_EXTEND_S K_FUNCTOR K_IMPORT K_ISLAND K_MODPATH
+%token K_EXPORT K_EXTEND_S K_FUNCTOR K_IMPORT K_ISLAND K_LATCH K_MODPATH
 %token K_NET K_NET_S K_NET_R K_NET_2S K_NET_2U
 %token K_NET8 K_NET8_2S K_NET8_2U K_NET8_S
 %token K_PARAM_STR K_PARAM_L K_PARAM_REAL K_PART K_PART_PV
@@ -94,13 +95,12 @@ static struct __vpiModPath*modpath_dst = 0;
 %token K_RESOLV K_SCOPE K_SFUNC K_SFUNC_E K_SHIFTL K_SHIFTR K_SHIFTRS
 %token K_SUBSTITUTE
 %token K_THREAD K_TIMESCALE K_TRAN K_TRANIF0 K_TRANIF1 K_TRANVP
-%token K_UFUNC K_UFUNC_E K_UDP K_UDP_C K_UDP_S
+%token K_UFUNC_REAL K_UFUNC_VEC4 K_UFUNC_E K_UDP K_UDP_C K_UDP_S
 %token K_VAR K_VAR_COBJECT K_VAR_DARRAY
 %token K_VAR_QUEUE
 %token K_VAR_S K_VAR_STR K_VAR_I K_VAR_R K_VAR_2S K_VAR_2U
 %token K_vpi_call K_vpi_call_w K_vpi_call_i
-%token K_vpi_func K_vpi_func_r
-%token K_disable K_fork
+%token K_vpi_func K_vpi_func_r K_vpi_func_s
 %token K_ivl_version K_ivl_delay_selection
 %token K_vpi_module K_vpi_time_precision K_file_names K_file_line
 %token K_PORT_INPUT K_PORT_OUTPUT K_PORT_INOUT K_PORT_MIXED K_PORT_NODIR
@@ -250,23 +250,18 @@ statement
         | T_LABEL K_ARRAY T_STRING ',' T_SYMBOL ';'
                 { compile_array_alias($1, $3, $5); }
 
- /* The .ufunc functor is for implementing user defined functions, or
+ /* The .ufunc functors are for implementing user defined functions, or
      other thread code that is automatically invoked if any of the
      bits in the symbols list change. */
 
-	| T_LABEL K_UFUNC T_SYMBOL ',' T_NUMBER ','
-	  symbols '(' symbols ')' symbol T_SYMBOL ';'
-		{ compile_ufunc($1, $3, $5,
-				$7.cnt, $7.vect,
-				$9.cnt, $9.vect,
-				$11, $12, 0); }
+  | T_LABEL K_UFUNC_REAL T_SYMBOL ',' T_NUMBER ',' symbols '(' symbols ')' T_SYMBOL ';'
+      { compile_ufunc_real($1, $3, $5, $7.cnt, $7.vect, $9.cnt, $9.vect, $11, 0); }
 
-	| T_LABEL K_UFUNC_E T_SYMBOL ',' T_NUMBER ',' T_SYMBOL ','
-	  symbols '(' symbols ')' symbol T_SYMBOL ';'
-		{ compile_ufunc($1, $3, $5,
-				$9.cnt, $9.vect,
-				$11.cnt, $11.vect,
-				$13, $14, $7); }
+  | T_LABEL K_UFUNC_VEC4 T_SYMBOL ',' T_NUMBER ',' symbols '(' symbols ')' T_SYMBOL ';'
+      { compile_ufunc_vec4($1, $3, $5, $7.cnt, $7.vect, $9.cnt, $9.vect, $11, 0); }
+
+  | T_LABEL K_UFUNC_E T_SYMBOL ',' T_NUMBER ',' T_SYMBOL ',' symbols '(' symbols ')' T_SYMBOL ';'
+      { compile_ufunc_vec4($1, $3, $5, $9.cnt, $9.vect, $11.cnt, $11.vect, $13, $7); }
 
   /* Resolver statements are very much like functors. They are
      compiled to functors of a different mode. */
@@ -503,14 +498,34 @@ statement
 
   /* DFF nodes have an output and take up to 4 inputs. */
 
-  | T_LABEL K_DFF symbol ',' symbol ',' symbol ';'
-      { compile_dff($1, $3, $5, $7); }
+  | T_LABEL K_DFF_N T_NUMBER symbol ',' symbol ',' symbol ';'
+      { compile_dff($1, $3, true, $4, $6, $8); }
 
-  | T_LABEL K_DFF_ACLR symbol ',' symbol ',' symbol ',' symbol ';'
-      { compile_dff_aclr($1, $3, $5, $7, $9); }
+  | T_LABEL K_DFF_P T_NUMBER symbol ',' symbol ',' symbol ';'
+      { compile_dff($1, $3, false, $4, $6, $8); }
 
-  | T_LABEL K_DFF_ASET symbol ',' symbol ',' symbol ',' symbol ';'
-      { compile_dff_aset($1, $3, $5, $7, $9); }
+  | T_LABEL K_DFF_N_ACLR T_NUMBER symbol ',' symbol ',' symbol ',' symbol ';'
+      { compile_dff_aclr($1, $3, true, $4, $6, $8, $10); }
+
+  | T_LABEL K_DFF_P_ACLR T_NUMBER symbol ',' symbol ',' symbol ',' symbol ';'
+      { compile_dff_aclr($1, $3, false, $4, $6, $8, $10); }
+
+  | T_LABEL K_DFF_N_ASET T_NUMBER symbol ',' symbol ',' symbol ',' symbol ';'
+      { compile_dff_aset($1, $3, true, $4, $6, $8, $10, 0); }
+
+  | T_LABEL K_DFF_P_ASET T_NUMBER symbol ',' symbol ',' symbol ',' symbol ';'
+      { compile_dff_aset($1, $3, false, $4, $6, $8, $10, 0); }
+
+  | T_LABEL K_DFF_N_ASET T_NUMBER symbol ',' symbol ',' symbol ',' symbol ',' T_SYMBOL ';'
+      { compile_dff_aset($1, $3, true, $4, $6, $8, $10, $12); }
+
+  | T_LABEL K_DFF_P_ASET T_NUMBER symbol ',' symbol ',' symbol ',' symbol ',' T_SYMBOL ';'
+      { compile_dff_aset($1, $3, false, $4, $6, $8, $10, $12); }
+
+  /* LATCH nodes have an output and take 2 inputs. */
+
+  | T_LABEL K_LATCH T_NUMBER symbol ',' symbol ';'
+      { compile_latch($1, $3, $4, $6); }
 
   /* The various reduction operator nodes take a single input. */
 
@@ -648,15 +663,10 @@ statement
       { compile_vpi_func_call($1, $5, -vpiRealVal, 0, $3, $4,
 			      $6.argc, $6.argv, $8, $9, $10); }
 
-  /* %disable statements are instructions that takes a scope reference
-     as an operand. It therefore is parsed uniquely. */
-
-	| label_opt K_disable symbol ';'
-		{ compile_disable($1, $3); }
-
-
-	| label_opt K_fork symbol ',' symbol ';'
-		{ compile_fork($1, $3, $5); }
+  | label_opt K_vpi_func_s T_NUMBER T_NUMBER T_STRING
+    argument_opt '{' T_NUMBER T_NUMBER T_NUMBER '}' ';'
+      { compile_vpi_func_call($1, $5, -vpiStringVal, 0, $3, $4,
+			      $6.argc, $6.argv, $8, $9, $10); }
 
   /* Scope statements come in two forms. There are the scope
      declaration and the scope recall. The declarations create the
@@ -679,20 +689,6 @@ statement
 	| T_LABEL K_SCOPE T_SYMBOL ',' T_STRING T_STRING T_NUMBER T_NUMBER ','
 	  T_NUMBER T_NUMBER T_NUMBER ',' T_SYMBOL ';'
 		{ compile_scope_decl($1, $3, $5, $6, $14, $7, $8, $10, $11, $12); }
-
-  /* Legacy declaration that does not have `celldefine information. */
-
-	| T_LABEL K_SCOPE T_SYMBOL ',' T_STRING T_STRING T_NUMBER T_NUMBER ','
-	  T_NUMBER T_NUMBER ',' T_SYMBOL ';'
-		{ compile_scope_decl($1, $3, $5, $6, $13, $7, $8, $10, $11, 0); }
-
-  /* XXXX Legacy declaration has no type name. */
-
-	| T_LABEL K_SCOPE T_SYMBOL ',' T_STRING ';'
-		{ compile_scope_decl($1, $3, $5, 0, 0, 0, 0, 0, 0, 0); }
-
-	| T_LABEL K_SCOPE T_SYMBOL ',' T_STRING ',' T_SYMBOL ';'
-		{ compile_scope_decl($1, $3, $5, 0, $7, 0, 0, 0, 0, 0); }
 
   /* Scope recall has no label of its own, but refers by label to a
      declared scope. */
@@ -824,18 +820,6 @@ statement
     symbols_net ';'
       { compile_netw_real($1, $3, $4, $6, $7, $9.cnt, $9.vect); }
 
-  /* Array word versions of alias directives. */
-
-        | T_LABEL K_ALIAS T_SYMBOL T_NUMBER ','
-	  signed_t_number signed_t_number ','
-          symbols_net ';'
-                 { compile_aliasw($1, $3, $4, $6, $7, $9.cnt, $9.vect); }
-
-        | T_LABEL K_ALIAS_R T_SYMBOL T_NUMBER ','
-	  signed_t_number signed_t_number ','
-          symbols_net ';'
-                 { compile_aliasw($1, $3, $4, $6, $7, $9.cnt, $9.vect); }
-
   /* Parameter statements come in a few simple forms. The most basic
      is the string parameter. */
 
@@ -877,7 +861,7 @@ statement
   | K_TRANVP T_NUMBER T_NUMBER T_NUMBER ',' T_SYMBOL ',' T_SYMBOL T_SYMBOL ';'
       { compile_island_tranvp($6, $8, $9, $2, $3, $4); }
 
-  /* Other statemehts */
+  /* Other statements */
 
   | T_LABEL K_CLASS T_STRING '[' T_NUMBER ']'
       { compile_class_start($1, $3, $5); }

@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 1999-2014 Stephen Williams (steve@icarus.com)
+ * Copyright (c) 1999-2016 Stephen Williams (steve@icarus.com)
  *
  *    This source code is free software; you can redistribute it
  *    and/or modify it in source code form under the terms of the GNU
@@ -545,7 +545,7 @@ NetEConst* NetEBComp::eval_eqeq_real_(bool ne_flag, const NetExpr*le, const NetE
       bool flag = get_real_arguments(le, re, lval, rval);
       if (! flag) return 0;
 
-      verinum result(((lval == rval) ^ ne_flag) ?
+      verinum result(((lval == rval) != ne_flag) ?
                      verinum::V1 : verinum::V0, 1);
       NetEConst*res = new NetEConst(result);
       ivl_assert(*this, res);
@@ -697,7 +697,9 @@ NetEConst* NetEBComp::eval_eqeqeq_(bool ne_flag, const NetExpr*le, const NetExpr
 	// If the left value is longer check it against the pad bit.
       if (res == verinum::V1) {
 	    verinum::V pad = verinum::V0;
-	    if (is_signed) pad = rv.get(rv.len()-1);
+	    if (is_signed)
+		  pad = rv.get(rv.len()-1);
+
 	    for (unsigned idx = cnt ;  idx < lv.len() ;  idx += 1)
 		  if (lv.get(idx) != pad) {
 			res = verinum::V0;
@@ -708,12 +710,15 @@ NetEConst* NetEBComp::eval_eqeqeq_(bool ne_flag, const NetExpr*le, const NetExpr
 	// If the right value is longer check it against the pad bit.
       if (res == verinum::V1) {
 	    verinum::V pad = verinum::V0;
-	    if (is_signed) pad = lv.get(lv.len()-1);
+	    if (is_signed)
+		  pad = lv.get(lv.len()-1);
+
 	    for (unsigned idx = cnt ;  idx < rv.len() ;  idx += 1) {
-		  if (rv.get(idx) != pad)
+		  if (rv.get(idx) != pad) {
 			res = verinum::V0;
 			break;
 		  }
+	    }
       }
 
       if (ne_flag) {
@@ -2009,6 +2014,12 @@ static bool check_dimension(const NetExpr*dim_expr, long &dim)
 static bool get_array_info(const NetExpr*arg, long dim,
                            long &left, long &right, bool&defer)
 {
+      if (const NetEConstParam*param = dynamic_cast<const NetEConstParam*>(arg)) {
+	assert(dim == 1);
+	left = param->expr_width() - 1;
+	right = 0;
+	return false;
+      }
 	/* The argument must be a signal that has enough dimensions. */
       const NetESignal*esig = dynamic_cast<const NetESignal*>(arg);
       if (esig == 0) return true;

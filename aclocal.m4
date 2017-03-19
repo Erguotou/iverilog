@@ -224,7 +224,10 @@ AC_SUBST(strip_dynamic)
 AC_DEFUN([AX_C99_STRTOD],
 [# On MinGW we need to jump through hoops to get a C99 compliant strtod().
 case "${host}" in
-    *-*-mingw*)
+    x86_64-w64-mingw32)
+        LDFLAGS+=" -Wl,--undefined=__strtod,--wrap,strtod,--defsym,___wrap_strtod=__strtod"
+        ;;
+    *-*-mingw32)
         LDFLAGS+=" -Wl,--undefined=___strtod,--wrap,strtod,--defsym,___wrap_strtod=___strtod"
         ;;
 esac
